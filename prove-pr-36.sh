@@ -27,6 +27,25 @@ curl -s https://bewusstki.de/.well-known/alex-pubkey.json -o pubkey.json
 node -e "process.stdout.write(require('./pubkey.json').public_key_pem)" > trusted-public-key.pem
 node -e "process.stdout.write(require('./pubkey.json').approval_signer.public_key_pem)" > trusted-approval-key.pem
 
+# PR #36 wurde mit inzwischen abgeloesten Schluesseln signiert (Details:
+# https://bewusstki.de/evidence-key-rotation.html) -- die aktuellen Well-known-Keys passen
+# dann nicht mehr. Historische Schluessel (Evidence UND Freigabe getrennt) aus derselben
+# Antwort nachschlagen, falls noetig.
+node -e "
+const pubkey = require('./pubkey.json');
+const bundle = require('./demo-pr-36.json');
+const revocations = (pubkey.trust_anchor_registry && pubkey.trust_anchor_registry.revocations) || [];
+function resolve(keyId, activeId, activePem, outFile, label) {
+  if (keyId === activeId) return;
+  const match = revocations.find(r => r.key_id === keyId);
+  if (!match) { console.error('Kein aktiver oder historischer ' + label + '-Schluessel fuer ' + keyId + ' gefunden.'); process.exit(1); }
+  require('fs').writeFileSync(outFile, match.public_key_pem);
+  console.log('Hinweis: PR #36 nutzt einen abgeloesten ' + label + '-Schluessel (' + match.key_id + '), historischen Wert verwendet.');
+}
+resolve(bundle.signer_key_id, pubkey.key_id, pubkey.public_key_pem, 'trusted-public-key.pem', 'Evidence');
+if (bundle.approval_attestation) resolve(bundle.approval_attestation.signer_key_id, pubkey.approval_signer.key_id, pubkey.approval_signer.public_key_pem, 'trusted-approval-key.pem', 'Freigabe');
+"
+
 echo "== [3/4] L1 -- Signatur + Hash-Kette + ci_result + Freigabe-Attestation pruefen =="
 node verifier/dist/verify.js demo-pr-36.json trusted-public-key.pem trusted-approval-key.pem
 

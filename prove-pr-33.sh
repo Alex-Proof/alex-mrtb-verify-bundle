@@ -18,7 +18,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 cd "$WORKDIR"
 
 echo "== [1/4] Verifier-Quelle klonen und bauen (kein vorgefertigtes Binary) =="
-git clone --quiet https://github.com/bewusstki-hue/alex-mrtb-verify-bundle.git verifier
+git clone --quiet https://github.com/Alex-Proof/alex-mrtb-verify-bundle.git verifier
 (cd verifier && npm install --silent && npm run build --silent)
 
 echo "== [2/4] Beweispaket + aktuelle Trust-Anchor laden =="
@@ -27,13 +27,32 @@ curl -s https://bewusstki.de/.well-known/alex-pubkey.json -o pubkey.json
 node -e "process.stdout.write(require('./pubkey.json').public_key_pem)" > trusted-public-key.pem
 node -e "process.stdout.write(require('./pubkey.json').approval_signer.public_key_pem)" > trusted-approval-key.pem
 
+# PR #33 wurde mit inzwischen abgeloesten Schluesseln signiert (Details:
+# https://bewusstki.de/evidence-key-rotation.html) -- die aktuellen Well-known-Keys passen
+# dann nicht mehr. Historische Schluessel (Evidence UND Freigabe getrennt) aus derselben
+# Antwort nachschlagen, falls noetig.
+node -e "
+const pubkey = require('./pubkey.json');
+const bundle = require('./demo-pr-33.json');
+const revocations = (pubkey.trust_anchor_registry && pubkey.trust_anchor_registry.revocations) || [];
+function resolve(keyId, activeId, activePem, outFile, label) {
+  if (keyId === activeId) return;
+  const match = revocations.find(r => r.key_id === keyId);
+  if (!match) { console.error('Kein aktiver oder historischer ' + label + '-Schluessel fuer ' + keyId + ' gefunden.'); process.exit(1); }
+  require('fs').writeFileSync(outFile, match.public_key_pem);
+  console.log('Hinweis: PR #33 nutzt einen abgeloesten ' + label + '-Schluessel (' + match.key_id + '), historischen Wert verwendet.');
+}
+resolve(bundle.signer_key_id, pubkey.key_id, pubkey.public_key_pem, 'trusted-public-key.pem', 'Evidence');
+if (bundle.approval_attestation) resolve(bundle.approval_attestation.signer_key_id, pubkey.approval_signer.key_id, pubkey.approval_signer.public_key_pem, 'trusted-approval-key.pem', 'Freigabe');
+"
+
 echo "== [3/4] L1 -- Signatur + Hash-Kette + ci_result + Freigabe-Attestation pruefen =="
 node verifier/dist/verify.js demo-pr-33.json trusted-public-key.pem trusted-approval-key.pem
 
 echo "== [4/4] L2 -- Diff im Paket gegen den echten Diff auf GitHub nachrechnen =="
 BASE=$(node -e "console.log(require('./demo-pr-33.json').controller_evidence.repository_state.base_commit)")
 RESULT=$(node -e "console.log(require('./demo-pr-33.json').controller_evidence.repository_state.result_commit)")
-git clone --quiet https://github.com/bewusstki-hue/alex-controlled-agent-demo.git repo
+git clone --quiet https://github.com/Alex-Proof/alex-controlled-agent-demo.git repo
 git -C repo diff "$BASE" "$RESULT" > github_diff.txt
 
 node -e "
@@ -57,4 +76,4 @@ console.log('fuer ' + '$BASE'.slice(0,12) + '..' + '$RESULT'.slice(0,12) + ' zei
 
 echo ""
 echo "Fertig. Fachliche Richtigkeit bleibt eine Review-Entscheidung."
-echo "PR ansehen: https://github.com/bewusstki-hue/alex-controlled-agent-demo/pull/33"
+echo "PR ansehen: https://github.com/Alex-Proof/alex-controlled-agent-demo/pull/33"
