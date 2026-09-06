@@ -1,5 +1,19 @@
 # Independent Evidence Bundle Verifier
 
+**Zuletzt bearbeitet:** 2026-09-06 (PR #37 -- erstes Paket mit Freigabe + Zeitstempel + Beobachter
+gemeinsam)
+**Von:** MERIDIAN
+
+`prove-pr-37.sh` beweist ein echtes, live durchgespieltes Bundle (`demo-pr-37.json`), das
+`approval_attestation`, `rfc3161_timestamp` UND `observer_receipt` gleichzeitig traegt -- die
+Kombination, die genau den Bindungsfix von weiter unten (05.09.-Sync) braucht, um korrekt zu
+verifizieren. Vor diesem Fix waere dieses Bundle faelschlich als manipuliert abgelehnt worden.
+`observer_inclusion` kann direkt nach der Aufnahme kurzzeitig `not_yet_anchored` statt `ok` zeigen
+(der Bitcoin-Anker des Beobachters laeuft stuendlich) -- das Gesamturteil `VERIFIED` bleibt davon
+unberuehrt.
+
+---
+
 **Zuletzt bearbeitet:** 2026-09-06 (Sync -- war seit der RFC-3161-Kettenpruefung vom 05.09. hinter
 dem echten Stand zurueck)
 **Von:** MERIDIAN
