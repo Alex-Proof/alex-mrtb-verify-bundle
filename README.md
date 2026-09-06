@@ -1,5 +1,18 @@
 # Independent Evidence Bundle Verifier
 
+**Zuletzt bearbeitet:** 2026-09-06 (PR #38 -- echter Slack-Befehl mit Abnahmekriterien statt
+leerer Testaufgabe)
+**Von:** MERIDIAN
+
+`prove-pr-38.sh` beweist ein Bundle (`demo-pr-38.json`), das ueber einen echten `/devtask`-Befehl
+im Slack-Kanal ausgeloest wurde (Token-Bucket-Rate-Limiter, 369 Zeilen inkl. Tests, explizite
+Abnahmekriterien im Befehl selbst) -- Freigabe ebenfalls im Kanal. Traegt wie PR #37
+`approval_attestation` + `rfc3161_timestamp` + `observer_receipt` gemeinsam. Ersetzt PR #36 als
+Slack-Beleg: #36s Auftragstext war "Testaufgabe zum Ausprobieren" (bewusst leer, reiner
+Pipeline-Rauchtest) -- #38 zeigt denselben Mechanismus mit echtem Inhalt.
+
+---
+
 **Zuletzt bearbeitet:** 2026-09-06 (PR #37 -- erstes Paket mit Freigabe + Zeitstempel + Beobachter
 gemeinsam)
 **Von:** MERIDIAN
