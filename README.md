@@ -1,5 +1,9 @@
 # Independent Evidence Bundle Verifier
 
+Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `independence/`
+dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
+ALEX-Runtime.
+
 **Zuletzt bearbeitet:** 2026-09-06 (PR #38 -- echter Slack-Befehl mit Abnahmekriterien statt
 leerer Testaufgabe)
 **Von:** MERIDIAN

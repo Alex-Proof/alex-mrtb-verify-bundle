@@ -13,6 +13,8 @@
     "test/",
     "spec/",
     "verify.py",
+    "trust-anchor.json",
+    "independence/",
     "bundle-*.json"
   ],
   "engines": {
