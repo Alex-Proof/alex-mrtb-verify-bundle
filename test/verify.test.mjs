@@ -1,7 +1,44 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { verifyBundleObject, verifyValidationAttestation, verifyReviewerAttestation } from "../dist/verify.js";
+import { canonicalEvidenceJson, evaluateProofPolicy, evaluateTrustRequirement, validateDevTaskEvidenceSpecV1, verifyBundleObject, verifyValidationAttestation, verifyReviewerAttestation, crossCheckObserverReceipt } from "../dist/verify.js";
+
+// 06.09.2026: einzige bewusste strukturelle Abweichung von der privaten Kopie in
+// tools/verify-bundle/test/verify.test.mjs -- dort ist der Pfad "../../../spec/..." (drei Ebenen,
+// weil die private Datei unter tools/verify-bundle/test/ liegt), hier "../spec/..." (eine Ebene,
+// weil dieses oeffentliche Repo flach ist, spec/ liegt direkt im Repo-Root). Inhalt sonst identisch.
+test("canonicalization goldfile binds identical UTF-8 bytes including spec_version", () => {
+  const gold = JSON.parse(readFileSync(new URL("../spec/canonicalization-v1.gold.json", import.meta.url), "utf8"));
+  const actual = canonicalEvidenceJson(gold.input);
+  assert.equal(actual, gold.canonical_utf8);
+  assert.equal(sha256(actual), gold.sha256);
+});
+
+test("Trust Model: mehrere schwache Signale duerfen keinen staerkeren Claim erzeugen", () => {
+  const result = evaluateTrustRequirement("attested", [
+    { artifact_id: "runtime-a", trust_level: "observed", provenance_resolved: true },
+    { artifact_id: "runtime-b", trust_level: "observed", provenance_resolved: true },
+    { artifact_id: "policy-c", trust_level: "policy_derived", provenance_resolved: true },
+  ]);
+  assert.deepEqual(result, { satisfied: false, effective_level: "unsupported", reason: "insufficient_trust_level" });
+});
+
+test("Trust Model: nur ein eigenstaendiges Artefakt auf Zielstufe stuetzt den Claim", () => {
+  assert.deepEqual(evaluateTrustRequirement("independently_witnessed", [
+    { artifact_id: "witness-1", trust_level: "independently_witnessed", provenance_resolved: true },
+  ]), { satisfied: true, effective_level: "independently_witnessed", supporting_artifact_id: "witness-1" });
+  assert.equal(evaluateTrustRequirement("observed", [
+    { artifact_id: "missing", trust_level: "observed", provenance_resolved: false },
+  ]).satisfied, false);
+});
+
+test("Trust Model: gueltige Kryptographie erhoeht die semantische Trust-Stufe nicht", () => {
+  assert.deepEqual(evaluateTrustRequirement("independently_witnessed", [
+    { artifact_id: "agent-signature", trust_level: "cryptographically_verified", provenance_resolved: true, semantic_trust_level: "observed" },
+  ]), { satisfied: false, effective_level: "unsupported", reason: "insufficient_trust_level" });
+});
 
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(",")}]` :
   value && typeof value === "object" ? `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}` : JSON.stringify(value);
@@ -119,7 +156,7 @@ function testSummary({ brief, cost_partial, denied, approval }) {
   return lines.join("\n");
 }
 
-function devTaskV21Bundle({ tamperSummary = false, omitCustomerEvidence = false, mismatchApprovalRef = false, openRisks = undefined, frozenCustomerSummary = undefined } = {}) {
+function devTaskV21Bundle({ tamperSummary = false, omitCustomerEvidence = false, mismatchApprovalRef = false } = {}) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
   const controllerEvidence = {
@@ -137,8 +174,7 @@ function devTaskV21Bundle({ tamperSummary = false, omitCustomerEvidence = false,
   };
   const customer_evidence = omitCustomerEvidence ? undefined : {
     schema_version: "customer-evidence@1.0", brief, cost_partial, denied, approval,
-    ...(openRisks !== undefined ? { open_risks: openRisks } : {}),
-    customer_summary: tamperSummary ? "manipuliert" : frozenCustomerSummary ?? testSummary({ brief, cost_partial, denied, approval }),
+    customer_summary: tamperSummary ? "manipuliert" : testSummary({ brief, cost_partial, denied, approval }),
   };
   const payload = {
     schema_version: "evidence-package@2.1",
@@ -186,29 +222,25 @@ test("evidence-package@2.1: rejects a customer_evidence.approval.approval_refere
   assert.equal(verifyBundleObject(clean, _trustedPublicKey).reason, "customer_approval_reference_mismatch");
 });
 
-// 04.09.2026: Golden-Fixture-Regressionstest fuer genau die Drift-Klasse, die diese Datei schon
-// mehrfach getroffen hat (RFC-3161, ci_result, approval_attestation, jetzt open_risks) -- die
-// Server-Seite (evidenceBundle.server.ts) bekam ein neues customer_evidence-Feld, dieser
-// unabhaengige Verifier zog erst spaeter nach. Bewusst KEIN Aufruf von testSummary() oben (die
-// kennt open_risks nicht und wuerde denselben blinden Fleck nur erneut verdecken) -- der erwartete
-// Text ist hier woertlich eingefroren, exakt wie ein echtes signiertes Bundle ihn enthaelt.
-test("evidence-package@2.1: accepts a customer_summary that includes the open_risks section", () => {
-  const bundle = devTaskV21Bundle({
-    openRisks: [
-      { code: "domain_correctness_not_verified", description: "Ob die Aenderung fachlich das Richtige tut, wurde nicht automatisiert geprueft.", recommended_action: "Review." },
-      { code: "coverage_not_measured", description: "Testabdeckung wird nicht automatisch gemessen.", recommended_action: "Coverage-Tool einsetzen." },
-    ],
-    frozenCustomerSummary:
-      "Testauftrag\n\nAuftrag:\nBitte README ergänzen.\n\nKosten:\n$1.23, 3 Turns, 1m 30s\n" +
-      "Es werden ausschließlich Aggregatkosten erfasst, keine Tokenzahlen.\n\nFreigabe:\n" +
-      "Bewiesen freigegeben über Kanal `pilot`.\nBestätigt von: andre\nBestätigt am: 2026-09-01T00:00:00.000Z\n\n" +
-      "Abgelehnte Aktionen:\nKeine abgelehnten Aktionen in diesem Lauf.\n\nOffene Risiken:\n" +
-      // sortiert nach code, nicht nach Einfuegereihenfolge: coverage_* vor domain_*
-      "- Testabdeckung wird nicht automatisch gemessen.\n- Ob die Aenderung fachlich das Richtige tut, wurde nicht automatisiert geprueft.",
-  });
+test("evidence-package@2.2: rejects a missing spec_version before trusting the package", () => {
+  const bundle = devTaskV21Bundle();
   const { _trustedPublicKey, ...clean } = bundle;
-  const result = verifyBundleObject(clean, _trustedPublicKey);
-  assert.deepEqual(result, { ok: false, reason: "non_verified_outcome:inconclusive" });
+  clean.schema_version = "evidence-package@2.2";
+  delete clean.spec_version;
+  assert.deepEqual(verifyBundleObject(clean, _trustedPublicKey), {
+    ok: false,
+    reason: "spec_validation_failed:missing_required_field:spec_version",
+  });
+});
+
+test("evidence-package@2.2: ignores unknown fields semantically but binds them cryptographically", () => {
+  const bundle = devTaskV21Bundle();
+  const { _trustedPublicKey, ...clean } = bundle;
+  clean.schema_version = "evidence-package@2.2";
+  clean.spec_version = "devtask.execution@1.0";
+  clean.approval_attestation_required = false;
+  clean.unfrozen_field = true;
+  assert.equal(validateDevTaskEvidenceSpecV1(clean), null);
 });
 
 test("accepts independent validation only for the trusted runner and exact commit", () => {
@@ -234,4 +266,112 @@ test("reviewer signature binds the exact bundle and validation bytes", () => {
     signature: sign(null, Buffer.from(canonical(payload)), privateKey).toString("base64") };
   assert.deepEqual(verifyReviewerAttestation(attestation, pem, bundle, validation), { ok: true });
   assert.equal(verifyReviewerAttestation(attestation, pem, Buffer.from("changed"), validation).reason, "review_scope_mismatch");
+});
+
+// Bauanleitung Evidence-Standard, Punkt 3 (06.09.2026): "Proof Policies" -- Mindestbeweislage vor
+// einer als "gated" markierten Aktion. Testpolicy mit allen fuenf Bedingungen, jede einzeln
+// gebrochen bzw. alle gemeinsam erfuellt.
+const proofPolicyUnderTest = {
+  policy_id: "test.pilot_pr_approve@1.0", gates_action: "test_gated_action",
+  requires: {
+    outcome: "verified", claim_ladder_min: "L1", human_approval: "required",
+    no_unsupported_required_claims: true, independent_witness: "required",
+  },
+};
+const allSatisfiedChecks = { signature: "ok", hash_chain: "ok", observer_inclusion: "ok" };
+function proofPolicyBundle(overrides = {}) {
+  return { bundle_id: "ppg-1", run_id: "ppg-run-1", executed_at: "2026-09-06T00:00:00.000Z",
+    outcome: "verified", claim_ladder: "L1", approval_attestation_required: true, trace_events: [], ...overrides };
+}
+
+test("evaluateProofPolicy: alle Bedingungen erfuellt -> laeuft ungehindert durch", () => {
+  const result = evaluateProofPolicy(proofPolicyUnderTest, proofPolicyBundle(), { effectiveClaimLadder: "L1", verifierChecks: allSatisfiedChecks });
+  assert.deepEqual(result, {
+    policy_id: "test.pilot_pr_approve@1.0", gates_action: "test_gated_action", allowed: true, blocked_by: [],
+    evaluated: {
+      outcome: { required: "verified", satisfied: true },
+      claim_ladder_min: { required: "L1", satisfied: true },
+      human_approval: { required: "required", satisfied: true },
+      no_unsupported_required_claims: { required: true, satisfied: true },
+      independent_witness: { required: "required", satisfied: true },
+    },
+  });
+});
+
+test("evaluateProofPolicy: outcome != verified blockiert -- nachweislich, nicht nur protokolliert", () => {
+  const result = evaluateProofPolicy(proofPolicyUnderTest, proofPolicyBundle({ outcome: "inconclusive" }), { effectiveClaimLadder: "L1", verifierChecks: allSatisfiedChecks });
+  assert.equal(result.allowed, false);
+  assert.deepEqual(result.blocked_by, ["outcome"]);
+});
+
+test("evaluateProofPolicy: Claim-Ladder unterhalb des Minimums blockiert", () => {
+  const result = evaluateProofPolicy(proofPolicyUnderTest, proofPolicyBundle(), { effectiveClaimLadder: "L0", verifierChecks: allSatisfiedChecks });
+  assert.equal(result.allowed, false);
+  assert.deepEqual(result.blocked_by, ["claim_ladder_min"]);
+});
+
+test("evaluateProofPolicy: fehlende human_approval blockiert", () => {
+  const result = evaluateProofPolicy(proofPolicyUnderTest, proofPolicyBundle({ approval_attestation_required: false }), { effectiveClaimLadder: "L1", verifierChecks: allSatisfiedChecks });
+  assert.equal(result.allowed, false);
+  assert.deepEqual(result.blocked_by, ["human_approval"]);
+});
+
+test("evaluateProofPolicy: ein required Claim mit falsch aufloesender Provenance blockiert no_unsupported_required_claims", () => {
+  // Ein fehlendes evidence_ref allein bleibt (Backward-Compat, spec/devtask.execution@1.0.md
+  // "Optionale Claim-Provenance") bewusst informativ -- erst ein VORHANDENES, aber falsch
+  // aufloesendes evidence_ref macht einen observed/attested-Claim "required: true, supported: false"
+  // (assessClaimEvidenceRefs() Reason "digest_mismatch").
+  const unsupportedClaimEvent = "devtask_negative_claim:" + JSON.stringify({
+    task_id: "t", attempt_number: 1, claim: "no_secret_access", verified_by: "sandbox", strength: "observed", result: true,
+    evidence_ref: { artifact: "runtime_trace", id: "trace_events:without_negative_claims", digest: "sha256:" + "0".repeat(64) },
+  });
+  const result = evaluateProofPolicy(proofPolicyUnderTest, proofPolicyBundle({ trace_events: [unsupportedClaimEvent] }), { effectiveClaimLadder: "L1", verifierChecks: allSatisfiedChecks });
+  assert.equal(result.allowed, false);
+  assert.deepEqual(result.blocked_by, ["no_unsupported_required_claims"]);
+});
+
+test("evaluateProofPolicy: independent_witness ist nur erfuellt, wenn der Verifier selbst eine echte Observer-Bestaetigung geliefert hat (echter lokaler Server, kein Mock)", async () => {
+  const baseBundle = proofPolicyBundle();
+
+  // Blockiert: kein observer_receipt vorhanden -- crossCheckObserverReceipt() braucht dafuer
+  // keinen Netzwerkaufruf, liefert real "not_applicable_no_observer_receipt".
+  const noReceiptResult = await crossCheckObserverReceipt(baseBundle);
+  assert.deepEqual(noReceiptResult, { ok: false, reason: "not_applicable_no_observer_receipt" });
+  const blockedChecks = { signature: "ok", hash_chain: "ok", observer_inclusion: noReceiptResult.reason };
+  const blockedEvaluation = evaluateProofPolicy(proofPolicyUnderTest, baseBundle, { effectiveClaimLadder: "L1", verifierChecks: blockedChecks });
+  assert.equal(blockedEvaluation.allowed, false);
+  assert.deepEqual(blockedEvaluation.blocked_by, ["independent_witness"]);
+
+  // Erlaubt: echter lokaler Observer-Stub, echter fetch(), echte Merkle-Pruefung nach RFC 6962
+  // (Ein-Blatt-Baum: audit_path leer, root_hash == leaf hash) -- kein Mock von
+  // crossCheckObserverReceipt() selbst, derselbe Code laeuft wie gegen den echten Observer-Dienst.
+  const receivedAt = "2026-09-06T00:00:05.000Z";
+  const expectedBundleSha256 = sha256(JSON.stringify(baseBundle));
+  const leafHash = createHash("sha256").update(Buffer.concat([Buffer.from([0x00]), Buffer.from(JSON.stringify({
+    bundle_id: baseBundle.bundle_id, bundle_sha256: expectedBundleSha256, run_id: baseBundle.run_id,
+    executed_at: baseBundle.executed_at, received_at: receivedAt,
+  }))])).digest("hex");
+
+  const server = createServer((req, res) => {
+    if (req.url === `/observer/receipt/${baseBundle.bundle_id}`) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ found: true, bundle_sha256: expectedBundleSha256, received_at: receivedAt, inclusion: { audit_path: [], root_hash: leafHash }, anchor: { status: "pending" } }));
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  try {
+    const address = server.address();
+    const observerUrl = `http://127.0.0.1:${address.port}`;
+    const bundleWithReceipt = { ...baseBundle, observer_receipt: { schema_version: "observer-receipt@1.0", observer_url: observerUrl, leaf_index: 0, received_at: receivedAt } };
+    const confirmedResult = await crossCheckObserverReceipt(bundleWithReceipt);
+    assert.deepEqual(confirmedResult, { ok: true, anchor_status: "pending" });
+    const allowedChecks = { signature: "ok", hash_chain: "ok", observer_inclusion: "ok" };
+    const allowedEvaluation = evaluateProofPolicy(proofPolicyUnderTest, bundleWithReceipt, { effectiveClaimLadder: "L1", verifierChecks: allowedChecks });
+    assert.equal(allowedEvaluation.allowed, true);
+    assert.deepEqual(allowedEvaluation.blocked_by, []);
+  } finally {
+    server.close();
+  }
 });

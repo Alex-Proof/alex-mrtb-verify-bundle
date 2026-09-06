@@ -1,5 +1,37 @@
 # Independent Evidence Bundle Verifier
 
+**Zuletzt bearbeitet:** 2026-09-06 (Sync -- war seit der RFC-3161-Kettenpruefung vom 05.09. hinter
+dem echten Stand zurueck)
+**Von:** MERIDIAN
+
+Dieses Repository war seit dem 05.09.2026 nicht mehr synchron mit dem tatsaechlich verwendeten
+Verifier -- `verify.ts` kannte weder die RFC-3161-Zertifikatsketten-Pruefung noch den unabhaengigen
+Observer-Cross-Check, und `verify.py` fehlte hier komplett. Jetzt nachgezogen:
+
+- **Proof Policies (Runtime Gate):** `evaluateProofPolicy()` prueft ein Bundle optional gegen eine
+  Policy-Datei (`spec/policies/`, hier bewusst NICHT mitveroeffentlicht -- die einzige bestehende
+  Beispiel-Policy haengt an einem internen, noch nicht produktiv verdrahteten Freigabe-Flow und
+  wuerde ausserhalb dieses Kontexts nichts beweisen). CLI: `ALEX_VERIFY_POLICY_FILE=pfad node
+  dist/verify.js bundle.json ...` -- blockiert mit Exit-Code 6, wenn eine Bedingung fehlt.
+  `independent_witness` kann NUR erfuellt werden, wenn dieser Verifier selbst per
+  `crossCheckObserverReceipt()` live gegen den Observer-Dienst geprueft hat -- nie eine blosse
+  Behauptung aus dem Bundle.
+- **Zwei echte Bugs behoben:** die Freigabe-Bindungspruefung (`approval_bundle_hash_mismatch`) und
+  `verifyRfc3161Binding()` schlossen `observer_receipt` bisher nicht aus ihrer jeweiligen
+  Nachrechnung aus, obwohl es serverseitig immer NACH Freigabe/Zeitstempel angehaengt wird -- jedes
+  entsprechend bezeugte Bundle waere hier faelschlich als manipuliert abgelehnt worden.
+- **`verify.py` neu:** der unabhaengige, netzlose Python-Verifier (Ed25519 ueber System-OpenSSL,
+  keine Python-Pakete noetig) ist jetzt Teil dieses Repos, nicht nur der internen Kopie.
+- **`spec/` neu:** die tatsaechlichen Invarianten (`INVARIANTS.md`), die eingefrorene
+  `devtask.execution@1.0`-Spezifikation samt JSON-Schema, und das Kanonisierungs-Goldfile liegen
+  jetzt hier -- vorher wurden sie nur in Code-Kommentaren referenziert, ohne dass eine externe
+  Leserin sie tatsaechlich einsehen konnte.
+
+`npm test` deckt weiterhin nur einen Teil ab: `verify.py` hat keine eigene Testsuite in diesem
+Repo (identisch zur internen Kopie) und wird nur strukturell/durch manuellen Lauf geprueft.
+
+---
+
 **Zuletzt bearbeitet:** 2026-09-01
 **Von:** MERIDIAN
 

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devtask.execution@1.0",
+  "title": "ALEX DevTask Execution Evidence Package",
+  "type": "object",
+  "required": [
+    "schema_version", "spec_version", "bundle_id", "capability", "run_id",
+    "claim_ladder", "executed_at", "trace_events", "trace_hash_chain", "outcome",
+    "signature", "public_key", "signer_key_id", "controller_evidence",
+    "required_evidence", "approval_attestation_required"
+  ],
+  "properties": {
+    "schema_version": { "const": "evidence-package@2.2" },
+    "spec_version": { "const": "devtask.execution@1.0" },
+    "capability": { "const": "devtask.execution@1.0" },
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "claim_ladder": { "enum": ["L0", "L1", "L2"] },
+    "executed_at": { "type": "string", "minLength": 1 },
+    "trace_events": { "type": "array", "items": { "type": "string" } },
+    "trace_hash_chain": { "type": "array", "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+    "outcome": { "enum": ["verified", "failed", "inconclusive"] },
+    "signature": { "type": "string", "minLength": 1 },
+    "public_key": { "type": "string", "minLength": 1 },
+    "signer_key_id": { "type": "string", "minLength": 1 },
+    "required_evidence": { "type": "array", "items": { "type": "string" } },
+    "approval_attestation_required": { "type": "boolean" },
+    "controller_evidence": {
+      "type": "object",
+      "required": [
+        "producer", "task_id", "attempt_number", "base_commit", "result_reference",
+        "diff_stat_sha256", "diff_full", "diff_full_sha256", "execution_reference",
+        "validation_reference", "approval_reference", "sandbox_reference",
+        "sandbox_attestation", "agent_run_id"
+      ],
+      "properties": {
+        "producer": { "const": "privileged_controller" },
+        "task_id": { "type": "string", "minLength": 1 },
+        "attempt_number": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "customer_evidence": { "type": "object" },
+    "rfc3161_timestamp": { "type": "object" },
+    "approval_attestation": { "type": "object" },
+    "observer_receipt": { "type": "object" }
+  },
+  "additionalProperties": true
+}

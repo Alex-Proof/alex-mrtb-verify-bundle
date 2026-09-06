@@ -1,0 +1,23 @@
+{
+  "input": {
+    "z": 1,
+    "spec_version": "devtask.execution@1.0",
+    "nested": {
+      "b": true,
+      "a": "ä"
+    },
+    "array": [
+      {
+        "y": 2,
+        "x": 1
+      }
+    ],
+    "evidence_ref": {
+      "artifact": "runtime_trace",
+      "id": "sandbox_attestation.network_capture",
+      "digest": "sha256:0123456789abcdef"
+    }
+  },
+  "canonical_utf8": "{\"array\":[{\"x\":1,\"y\":2}],\"evidence_ref\":{\"artifact\":\"runtime_trace\",\"digest\":\"sha256:0123456789abcdef\",\"id\":\"sandbox_attestation.network_capture\"},\"nested\":{\"a\":\"ä\",\"b\":true},\"spec_version\":\"devtask.execution@1.0\",\"z\":1}",
+  "sha256": "5f4b2fa53d1ec6224ec63ad9490ec3e6fec99e052d411f5c5fab8555b48d7b28"
+}

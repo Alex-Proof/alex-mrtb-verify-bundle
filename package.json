@@ -11,6 +11,8 @@
     "sample-bundle.json",
     "invalid-tampered-bundle.json",
     "test/",
+    "spec/",
+    "verify.py",
     "bundle-*.json"
   ],
   "engines": {
@@ -20,7 +22,13 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build --silent && node --test test/*.test.mjs",
     "verify": "npm run build --silent && node dist/verify.js",
+    "verify:python": "python3 verify.py",
     "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@peculiar/asn1-cms": "^2.9.4",
+    "@peculiar/asn1-schema": "^2.9.4",
+    "@peculiar/asn1-x509": "^2.9.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
