@@ -3,7 +3,7 @@ description: >
   Independently re-verifies a signed ALEX devtask.execution Evidence Bundle (extracted from a PR
   comment) against the public trust anchor at https://bewusstki.de/.well-known/alex-pubkey.json.
   Shells out to this repo's own verify.ts CLI -- no crypto/hash-chain logic duplicated here.
-author: "bewusstki-hue"
+author: "Alex-Proof"
 
 inputs:
   bundle-json:
@@ -35,7 +35,7 @@ runs:
     - name: Checkout verifier source (separate from the caller's own checkout)
       uses: actions/checkout@v4
       with:
-        repository: bewusstki-hue/alex-mrtb-verify-bundle
+        repository: Alex-Proof/alex-mrtb-verify-bundle
         ref: ${{ inputs.ref }}
         path: _alex-verifier
 

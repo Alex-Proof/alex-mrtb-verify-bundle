@@ -75,7 +75,7 @@ interne Kontroll-/Freigabepfad. Erstes oeffentliches Paket mit dieser Anforderun
 Fremdverifikation End-zu-Ende vor. PR #33 ist der aktuelle, offen gelassene Inhaltsbeweis:
 
 ```bash
-curl -O https://raw.githubusercontent.com/bewusstki-hue/alex-mrtb-verify-bundle/main/prove-pr-33.sh
+curl -O https://raw.githubusercontent.com/Alex-Proof/alex-mrtb-verify-bundle/main/prove-pr-33.sh
 bash prove-pr-33.sh
 ```
 

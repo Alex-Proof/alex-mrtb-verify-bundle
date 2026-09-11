@@ -16,7 +16,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 cd "$WORKDIR"
 
 echo "== [1/4] Verifier-Quelle klonen und bauen (kein vorgefertigtes Binary) =="
-git clone --quiet https://github.com/bewusstki-hue/alex-mrtb-verify-bundle.git verifier
+git clone --quiet https://github.com/Alex-Proof/alex-mrtb-verify-bundle.git verifier
 (cd verifier && npm install --silent && npm run build --silent)
 
 echo "== [2/4] Beweispaket + aktuellen Trust-Anchor laden =="
@@ -33,7 +33,7 @@ node verifier/dist/verify.js demo-pr-31.json trusted-public-key.pem trusted-appr
 echo "== [4/4] L2 -- Diff im Paket gegen den echten Diff auf GitHub nachrechnen =="
 BASE=$(node -e "console.log(require('./demo-pr-31.json').controller_evidence.repository_state.base_commit)")
 RESULT=$(node -e "console.log(require('./demo-pr-31.json').controller_evidence.repository_state.result_commit)")
-git clone --quiet https://github.com/bewusstki-hue/alex-controlled-agent-demo.git repo
+git clone --quiet https://github.com/Alex-Proof/alex-controlled-agent-demo.git repo
 git -C repo diff "$BASE" "$RESULT" > github_diff.txt
 
 node -e "
@@ -57,4 +57,4 @@ console.log('fuer ' + '$BASE'.slice(0,12) + '..' + '$RESULT'.slice(0,12) + ' zei
 "
 
 echo ""
-echo "Fertig. PR ansehen: https://github.com/bewusstki-hue/alex-controlled-agent-demo/pull/31"
+echo "Fertig. PR ansehen: https://github.com/Alex-Proof/alex-controlled-agent-demo/pull/31"

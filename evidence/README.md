@@ -30,7 +30,7 @@ ist noch nicht Teil des signierten Trace. Neuere Pakete (ab `pr-31`) enthalten `
 ## Fremdverifikation aus einem frischen Clone
 
 ```bash
-git clone https://github.com/bewusstki-hue/alex-mrtb-verify-bundle.git
+git clone https://github.com/Alex-Proof/alex-mrtb-verify-bundle.git
 cd alex-mrtb-verify-bundle
 npm ci
 npm run build
