@@ -220,6 +220,45 @@ def validate_spec_v1(bundle: dict[str, Any]) -> str | None:
 NEGATIVE_CLAIM_PREFIX = "devtask_negative_claim:"
 
 
+def _has_complete_policy_kernel_file_observation(bundle: dict[str, Any]) -> bool:
+    controller = bundle.get("controller_evidence")
+    attestation = controller.get("sandbox_attestation") if isinstance(controller, dict) else None
+    observation = attestation.get("file_observation") if isinstance(attestation, dict) else None
+    return (
+        isinstance(observation, dict)
+        and observation.get("schema_version") == "policy-kernel-file-observation@1.0"
+        and observation.get("observer") == "policy_kernel_process"
+        and isinstance(observation.get("kernel_pid"), int) and observation["kernel_pid"] > 0
+        and isinstance(observation.get("allowed_write_paths"), list)
+        and isinstance(observation.get("inspected_entry_count"), int) and observation["inspected_entry_count"] >= 0
+        and observation.get("blocked_attempt_count") == 0
+        and isinstance(observation.get("completed_at"), str) and len(observation["completed_at"]) > 0
+    )
+
+
+def effective_negative_claim_strengths(bundle: dict[str, Any], verifier_checks: dict[str, str]) -> dict[str, str]:
+    """Verifier-derived view only; never mutates signed claims or their outcome."""
+    result: dict[str, str] = {}
+    for raw in bundle.get("trace_events", []):
+        if not isinstance(raw, str) or not raw.startswith(NEGATIVE_CLAIM_PREFIX):
+            continue
+        try:
+            claim = json.loads(raw[len(NEGATIVE_CLAIM_PREFIX):])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        strength = claim.get("strength")
+        if (
+            claim.get("claim") == "no_write_outside_allowlist"
+            and claim.get("result") is True
+            and strength == "observed"
+            and _has_complete_policy_kernel_file_observation(bundle)
+            and verifier_checks.get("policy_kernel_witness") == "ok"
+        ):
+            strength = "independently_witnessed"
+        if isinstance(claim.get("claim"), str) and isinstance(strength, str):
+            result[claim["claim"]] = strength
+    return result
+
 def claim_evidence_ref_assessments(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     base_events = [event for event in bundle.get("trace_events", []) if not event.startswith(NEGATIVE_CLAIM_PREFIX)]
     assessments: list[dict[str, Any]] = []
@@ -364,7 +403,7 @@ def main() -> int:
         if args.policy:
             with open(args.policy, encoding="utf-8") as handle:
                 policy = json.load(handle)
-            verifier_checks = {"signature": "ok", "hash_chain": "ok"}
+            verifier_checks = {"signature": "ok", "hash_chain": "ok", "policy_kernel_witness": "not_checked_offline"}
             evaluation = evaluate_proof_policy(policy, bundle, bundle.get("claim_ladder", ""), verifier_checks)
             if evaluation["allowed"]:
                 print(f"PROOF POLICY '{evaluation['policy_id']}' SATISFIED -- gated action '{evaluation['gates_action']}' allowed.")

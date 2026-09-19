@@ -63,7 +63,7 @@ function buildBundle(observerUrl) {
   return { bundle, bundleSha256 };
 }
 
-test("crossCheckObserverReceipt: akzeptiert eine echte Inklusion mit bitcoin-bestaetigtem Anker", async (t) => {
+test("crossCheckObserverReceipt: wertet einen unbelegten bitcoin_confirmed-Status nicht als Bitcoin-Beweis", async (t) => {
   const { server, url } = await startMockObserver({ anchorStatus: "bitcoin_confirmed" });
   t.after(() => server.close());
   const { bundle, bundleSha256 } = buildBundle(url);
@@ -74,7 +74,7 @@ test("crossCheckObserverReceipt: akzeptiert eine echte Inklusion mit bitcoin-bes
   });
   const withReceipt = { ...bundle, observer_receipt: { schema_version: "observer-receipt@1.0", observer_url: url, leaf_index: 0, received_at: "2026-09-05T00:00:00.000Z" } };
   const result = await crossCheckObserverReceipt(withReceipt);
-  assert.deepEqual(result, { ok: true, anchor_status: "bitcoin_confirmed" });
+  assert.deepEqual(result, { ok: true, anchor_status: "observer_reported_bitcoin_confirmed" });
 });
 
 test("crossCheckObserverReceipt: meldet not_applicable ohne observer_receipt", async () => {

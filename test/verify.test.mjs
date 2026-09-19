@@ -201,7 +201,11 @@ test("evidence-package@2.1: a correct customer_evidence block passes through to 
   const result = verifyBundleObject(clean, _trustedPublicKey);
   // Absichtlich "inconclusive" (leere trace_events, kein voller devtask-Lauf simuliert) -- waere
   // hier eine der NEUEN 2.1-Pruefungen faelschlich fehlgeschlagen, stuende ein anderer reason.
-  assert.deepEqual(result, { ok: false, reason: "non_verified_outcome:inconclusive" });
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "non_verified_outcome:inconclusive",
+    verified_claim_ladder: "L0",
+  });
 });
 
 test("evidence-package@2.1: rejects a bundle missing customer_evidence entirely", () => {

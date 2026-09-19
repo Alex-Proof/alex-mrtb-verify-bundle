@@ -508,6 +508,14 @@ interface SandboxAttestationV2 {
   network_policy: "bubblewrap_unshare_net_fail_closed" | "netns_egress_logged_v1" | "netns_egress_allowlisted_v1"; environment_policy: "bubblewrap_clearenv";
   process_policy: "systemd_scope_limits_and_kill"; handoff_manifest_sha256: string; rejected_manifest_sha256: string;
   network_capture: NetworkCaptureEvidenceV1 | null;
+  file_observation?: {
+    schema_version: "policy-kernel-file-observation@1.0"; observer: "policy_kernel_process"; kernel_pid: number;
+    allowed_write_paths: string[]; inspected_entry_count: number; blocked_attempt_count: number; completed_at: string;
+  };
+  policy_kernel_observer_receipt?: {
+    schema_version: "policy-kernel-observer-receipt@1.0"; observer_url: string; leaf_index: number; received_at: string;
+    bundle_id: string; run_id: string; observation_digest_sha256: string;
+  };
 }
 
 const SANDBOX_ATTESTATION_POLICY_NO_NETWORK = {
@@ -776,6 +784,41 @@ function parseDevTaskEvent<T>(event: string, prefix: string): T | null {
   }
 }
 
+export type EffectiveNegativeClaimStrength = "policy_derived" | "observed" | "attested" | "independently_witnessed" | "cryptographically_verified";
+
+function hasCompletePolicyKernelFileObservation(bundle: EvidenceBundle): boolean {
+  const observation = bundle.controller_evidence?.sandbox_attestation?.file_observation;
+  return observation?.schema_version === "policy-kernel-file-observation@1.0"
+    && observation.observer === "policy_kernel_process"
+    && Number.isInteger(observation.kernel_pid) && (observation.kernel_pid as number) > 0
+    && Array.isArray(observation.allowed_write_paths)
+    && Number.isInteger(observation.inspected_entry_count) && (observation.inspected_entry_count as number) >= 0
+    && observation.blocked_attempt_count === 0
+    && typeof observation.completed_at === "string" && observation.completed_at.length > 0;
+}
+
+/** Verifier-abgeleitete Sicht; veraendert weder signierte Trace-Events noch deren Outcome.
+ * Fehlende oder abweichende Bezeugung ist nur fehlende Verstaerkung und bleibt `observed`. */
+export function effectiveNegativeClaimStrengths(
+  bundle: EvidenceBundle,
+  verifierChecks: Record<string, string>,
+): Record<string, EffectiveNegativeClaimStrength> {
+  const result: Record<string, EffectiveNegativeClaimStrength> = {};
+  for (const raw of bundle.trace_events) {
+    const claim = parseDevTaskEvent<DevTaskNegativeClaimTraceEvent>(raw, DEVTASK_NEGATIVE_CLAIM_PREFIX);
+    if (!claim) continue;
+    let strength = claim.strength as EffectiveNegativeClaimStrength;
+    if (claim.claim === "no_write_outside_allowlist"
+      && claim.result === true
+      && strength === "observed"
+      && hasCompletePolicyKernelFileObservation(bundle)
+      && verifierChecks.policy_kernel_witness === "ok") {
+      strength = "independently_witnessed";
+    }
+    result[claim.claim] = strength;
+  }
+  return result;
+}
 export interface ClaimEvidenceRefAssessment {
   claim: string;
   supported: boolean;
@@ -1275,7 +1318,9 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
   }
 
   if (bundle.outcome !== "verified") {
-    return { ok: false, reason: `non_verified_outcome:${bundle.outcome}` };
+    return verifiedClaimLadder !== undefined
+      ? { ok: false, reason: `non_verified_outcome:${bundle.outcome}`, verified_claim_ladder: verifiedClaimLadder }
+      : { ok: false, reason: `non_verified_outcome:${bundle.outcome}` };
   }
 
   return verifiedClaimLadder !== undefined ? { ok: true, verified_claim_ladder: verifiedClaimLadder } : { ok: true };
@@ -1476,17 +1521,23 @@ function verifyObserverAuditPath(leaf: Buffer, path: ObserverAuditPathStep[], ex
 export interface ObserverCheckResult {
   ok: boolean;
   reason?: string;
-  anchor_status?: "pending" | "bitcoin_confirmed";
+  anchor_status?: "pending" | "observer_reported_bitcoin_confirmed";
+}
+
+function reportedAnchorStatus(anchor: unknown): ObserverCheckResult["anchor_status"] | undefined {
+  if (!anchor || typeof anchor !== "object") return undefined;
+  const status = (anchor as { status?: unknown }).status;
+  if (status === "pending") return "pending";
+  if (status === "bitcoin_confirmed") return "observer_reported_bitcoin_confirmed";
+  return undefined;
 }
 
 /** Fragt den Observer-Dienst FRISCH und DIREKT ab (nie nur die im Bundle mitgelieferte Kopie
  *  vertrauen -- sonst waere die Pruefung zirkulaer, derselbe Designfehler, der bei
  *  crossCheckTrustAnchor() in Phase 1.2 schon einmal vor dem Commit korrigiert wurde). Prueft den
- *  Merkle-Inclusion-Proof selbst nach. Der OpenTimestamps-Anker-Status (`pending`/
- *  `bitcoin_confirmed`) wird dagegen vom Observer UEBERNOMMEN, nicht durch eine zusaetzliche
- *  OTS-Kryptopruefung hier bestaetigt -- vermeidet eine zweite `opentimestamps`-Abhaengigkeit mit
- *  denselben bekannten CVEs (siehe observer-service/README.md) in diesem staerker
- *  sicherheitskritischen, oeffentlich verteilten Werkzeug. */
+ *  Merkle-Inclusion-Proof selbst nach. Eine Bitcoin-Bestaetigung wird hier NICHT kryptografisch
+ *  geprueft. Der vom Observer gemeldete Status wird deshalb nur als
+ *  `observer_reported_bitcoin_confirmed` ausgegeben und nicht als eigener Bitcoin-Nachweis. */
 export async function crossCheckObserverReceipt(bundle: EvidenceBundle): Promise<ObserverCheckResult> {
   if (!bundle.observer_receipt) return { ok: false, reason: "not_applicable_no_observer_receipt" };
   const { observer_receipt, ...withoutObserverReceipt } = bundle;
@@ -1514,9 +1565,51 @@ export async function crossCheckObserverReceipt(bundle: EvidenceBundle): Promise
   const inclusionOk = verifyObserverAuditPath(leaf, data.inclusion.audit_path, data.inclusion.root_hash);
   if (!inclusionOk) return { ok: false, reason: "inclusion_proof_invalid" };
 
-  return { ok: true, anchor_status: data.anchor.status };
+  const anchorStatus = reportedAnchorStatus(data.anchor);
+  if (!anchorStatus) return { ok: false, reason: "invalid_anchor_status" };
+  return { ok: true, anchor_status: anchorStatus };
 }
 
+export async function crossCheckPolicyKernelObservation(bundle: EvidenceBundle): Promise<ObserverCheckResult> {
+  const attestation = bundle.controller_evidence?.sandbox_attestation;
+  const observation = attestation?.file_observation;
+  const receipt = attestation?.policy_kernel_observer_receipt;
+  if (!observation) return { ok: false, reason: "not_applicable_no_file_observation" };
+  if (!receipt) return { ok: false, reason: "not_applicable_no_policy_kernel_observer_receipt" };
+  if (observation.blocked_attempt_count !== 0) return { ok: false, reason: "not_applicable_blocked_attempts_present" };
+
+  const expectedDigest = sha256(canonical({ blocked_attempts: [], file_observation: observation }));
+  if (receipt.observation_digest_sha256 !== expectedDigest) return { ok: false, reason: "observation_digest_mismatch" };
+
+  let response: Response;
+  try {
+    const url = `${receipt.observer_url.replace(/\/$/, "")}/observer/receipt/${encodeURIComponent(receipt.bundle_id)}?entry_type=${encodeURIComponent("policy_kernel_attestation@1.0")}`;
+    response = await fetch(url);
+  } catch (error) {
+    return { ok: false, reason: `observer_unreachable:${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!response.ok) return { ok: false, reason: `observer_http_${response.status}` };
+  const data: any = await response.json();
+  if (!data.found) return { ok: false, reason: "observer_does_not_know_policy_kernel_attestation" };
+  if (data.entry_type !== "policy_kernel_attestation@1.0") return { ok: false, reason: "observer_entry_type_mismatch" };
+  if (data.observation_digest_sha256 !== expectedDigest) return { ok: false, reason: "observation_digest_mismatch" };
+  if (!data.inclusion || !data.anchor) return { ok: false, reason: "not_yet_anchored" };
+
+  const leaf = observerLeafHash(Buffer.from(JSON.stringify({
+    bundle_id: receipt.bundle_id,
+    entry_type: "policy_kernel_attestation@1.0",
+    executed_at: observation.completed_at,
+    observation_digest_sha256: data.observation_digest_sha256,
+    received_at: data.received_at,
+    run_id: receipt.run_id,
+  })));
+  if (!verifyObserverAuditPath(leaf, data.inclusion.audit_path, data.inclusion.root_hash)) {
+    return { ok: false, reason: "inclusion_proof_invalid" };
+  }
+  const anchorStatus = reportedAnchorStatus(data.anchor);
+  if (!anchorStatus) return { ok: false, reason: "invalid_anchor_status" };
+  return { ok: true, anchor_status: anchorStatus };
+}
 // Bauanleitung Evidence-Standard, Punkt 3 (06.09.2026): "Proof Policies" -- Mindestbeweislage vor
 // einer als "gated" markierten Aktion. Siehe spec/policies/README.md fuer das Format. Identische
 // Kopie in server/services/mrtb/evidenceBundle.server.ts (kein Shared Import, siehe Datei-Header
@@ -1749,6 +1842,14 @@ async function main() {
     checks.observer_inclusion = "not_applicable_no_observer_receipt";
   }
 
+  const policyKernelWitness = await crossCheckPolicyKernelObservation(bundle);
+  checks.policy_kernel_witness = policyKernelWitness.ok ? "ok" : (policyKernelWitness.reason ?? "failed");
+  if (policyKernelWitness.ok) {
+    console.log(`   Policy-Kernel-Beobachtung frisch beim Observer bestaetigt, Anker-Status: ${policyKernelWitness.anchor_status}.`);
+  } else if (bundle.controller_evidence?.sandbox_attestation?.file_observation) {
+    console.warn(`   Policy-Kernel-Beobachtung nicht unabhaengig bestaetigt: ${policyKernelWitness.reason} -- Claim bleibt observed.`);
+  }
+
   // spec/INVARIANTS.md: Nur die eigenstaendige, signierte Reviewer-Attestation bindet Bundle
   // und unabhaengige Validation semantisch. RFC-3161 und Observer belegen Integritaet/Zeit/Inklusion,
   // ergeben aber auch zusammen keine unabhaengige Wiederholung der behaupteten Arbeit.
@@ -1784,7 +1885,7 @@ async function main() {
   }
 
   console.log("");
-  console.log(JSON.stringify({ signed_claim_ladder: bundle.claim_ladder, verified_claim_ladder: verifiedClaimLadder, checks, proof_policy: proofPolicyResult }, null, 2));
+  console.log(JSON.stringify({ signed_claim_ladder: bundle.claim_ladder, verified_claim_ladder: verifiedClaimLadder, verified_negative_claim_strengths: effectiveNegativeClaimStrengths(bundle, checks), checks, proof_policy: proofPolicyResult }, null, 2));
 
   if (proofPolicyResult && !proofPolicyResult.allowed) {
     process.exitCode = 6;
