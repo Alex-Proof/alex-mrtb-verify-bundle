@@ -15,7 +15,10 @@
     "verify.py",
     "trust-anchor.json",
     "independence/",
-    "bundle-*.json"
+    "bundle-*.json",
+    "epistemic-gate-*.json",
+    "network-egress-deny-canary-14.json",
+    "cline-acp-canary-13.json"
   ],
   "engines": {
     "node": ">=20"

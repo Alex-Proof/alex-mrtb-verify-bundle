@@ -299,3 +299,30 @@ Attestierung, siehe "Deliberate limits" oben).
 Neue freigegebene V2-Pakete tragen eine zweite Ed25519-Signatur ueber den SHA-256 des exakten,
 bereits signierten Bundles. Das signierte Pflichtmerkmal verhindert stilles Weglassen;
 historische V2-Pakete bleiben unveraendert gueltig und werden nicht nachsigniert.
+
+**Zuletzt bearbeitet:** 2026-09-26
+**Von:** Claude Code (MERIDIAN)
+Dieses Repository war seit dem 09.09. gegenüber der internen Kopie zurückgefallen (fehlte u.a.
+`VerdictArtifactV1` und das neue `epistemic_gate`-Attestat komplett) -- nachgezogen in `verify.ts`
+und `verify.py`, keine öffentlich-exklusive Logik verloren.
+
+Neu: `verifyEpistemicGateBinding()` (TS) / `verify_epistemic_gate_binding()` (Python) prüfen ein
+optionales `epistemic_gate`-Attestat -- eine signierte Selbstauskunft darüber, wie viele der für
+das jeweilige Bewertungsprofil verbindlichen Module (`tests_ci`, `deps_scan`, `offline_verify`,
+`untouched_scope`, `injection_check`, `cost_model_bind`; vier weitere Module sind rein informativ
+und nie Pflicht) tatsächlich gelaufen sind. Über der Schwelle wird die Kunden-Akte serverseitig
+gehedged (`decision: "silent"`) statt eine selbstsichere Aussage zu zeigen. Wie `rfc3161_timestamp`
+und `observer_receipt` ist dies eine separate, explizit aufzurufende Prüfung -- kein Teil der
+Kernsignaturprüfung, damit alte Bundles ohne dieses Feld nicht fälschlich als manipuliert gelten.
+
+Drei echte Negativ-Fixtures ergänzt (`epistemic-gate-changed.json`, `epistemic-gate-removed.json`,
+`epistemic-gate-replayed.json`), byte-für-byte abgeleitet von den beiden bereits veröffentlichten,
+echten Canary-Bundles (`network-egress-deny-canary-14.json`, `cline-acp-canary-13.json`, beide jetzt
+ebenfalls in diesem Repo) -- keine synthetischen Beispiele. Alle drei lehnen mit demselben Reason-Code
+in TS und Python ab: fehlendes Attestat -> `epistemic_gate_not_attached`, nachträglich geändertes
+Gate-Ergebnis -> `invalid_epistemic_gate_signature`, aus einem anderen Bundle repliziertes Attestat
+-> `epistemic_gate_hash_mismatch`. Neue Regressionstests in `test/epistemic-gate.test.mjs`.
+
+Ausgelöst durch eine unabhängige Prüfung von Iman Schrock (EMILIA-Protocol, SCITT-IETF-Mailingliste),
+die genau diese drei Manipulationsfälle angefragt hatte und dabei gegen die veraltete Kopie dieses
+Repos getestet hätte.

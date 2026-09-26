@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { AsnSerializer, AsnParser, OctetString } from "@peculiar/asn1-schema";
 import { ContentInfo, SignedData, SignerInfo, id_messageDigest } from "@peculiar/asn1-cms";
 
@@ -111,6 +111,10 @@ export interface EvidenceBundle {
   // rfc3161_timestamp -- erst nach dem Signieren best-effort angehaengt, kein Teil der
   // Ed25519-Signaturnutzlast. Identische Definition zu observerRelay.server.ts im Alex-Monorepo.
   observer_receipt?: ObserverReceipt;
+  // 26.09.2026 (Iman/EMILIA-Feedback, SCITT-Mailingliste): letzter Attach-Schritt der Pipeline
+  // (nach observer_receipt), identische Definition zu receipts.server.ts im Alex-Monorepo. Nur die
+  // Huelle wird hier gepruefte -- der innere gate-Wert selbst ist fuer den Verifier opak.
+  epistemic_gate?: EpistemicGateAttestationV1;
 }
 
 export interface ObserverReceipt {
@@ -123,6 +127,35 @@ export interface ObserverReceipt {
 export interface ApprovalAttestationV1 {
   schema_version: "approval-attestation@1.0"; actor_id: string; approved_at: string; bundle_sha256: string;
   signer_key_id: string; public_key: string; signature: string;
+}
+
+export interface EpistemicGateAttestationV1 {
+  schema_version: "epistemic-gate-attestation@1.0";
+  gate: unknown;
+  bundle_sha256: string;
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+/** Separate, explizit aufzurufende Pruefung -- verifyBundleObject() ruft diese Funktion NICHT
+ *  selbst auf, identisches Muster wie verifyRfc3161Binding()/crossCheckObserverReceipt() hier und
+ *  identische Definition zu verifyEpistemicGateBinding() in receipts.server.ts im Alex-Monorepo. */
+export function verifyEpistemicGateBinding(bundle: EvidenceBundle, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  if (!bundle.epistemic_gate) return { ok: false, reason: "epistemic_gate_not_attached" };
+  const { epistemic_gate, ...withoutGate } = bundle;
+  const { signature, public_key, signer_key_id, ...payload } = epistemic_gate;
+  if (public_key !== trustedPublicKey || signer_key_id !== evidenceSignerKeyId(trustedPublicKey)) {
+    return { ok: false, reason: "untrusted_epistemic_gate_signer" };
+  }
+  const expectedBundleSha256 = sha256(JSON.stringify(withoutGate));
+  if (payload.bundle_sha256 !== expectedBundleSha256) {
+    return { ok: false, reason: "epistemic_gate_hash_mismatch" };
+  }
+  if (!verify(null, Buffer.from(JSON.stringify(payload)), public_key, Buffer.from(signature, "base64"))) {
+    return { ok: false, reason: "invalid_epistemic_gate_signature" };
+  }
+  return { ok: true };
 }
 
 /** Prueft nur, dass ein vorhandener Zeitstempel wirklich zu DIESEM Bundle-Inhalt gehoert
@@ -140,7 +173,7 @@ export interface ApprovalAttestationV1 {
  *  die Bindung bei jedem zusaetzlich vom Observer bezeugten Bundle deterministisch. */
 export function verifyRfc3161Binding(bundle: EvidenceBundle): { ok: boolean; reason?: string } {
   if (!bundle.rfc3161_timestamp) return { ok: false, reason: "no_timestamp_present" };
-  const { rfc3161_timestamp, approval_attestation, observer_receipt, ...withoutTimestamp } = bundle;
+  const { rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...withoutTimestamp } = bundle;
   const recomputed = sha256(JSON.stringify(withoutTimestamp));
   if (recomputed !== rfc3161_timestamp.timestamped_sha256) return { ok: false, reason: "timestamp_hash_mismatch" };
   return { ok: true };
@@ -299,6 +332,7 @@ export function verifyRfc3161TsaChain(timestamp: Rfc3161Timestamp): { ok: boolea
 interface DevTaskControllerEvidenceV2 {
   /** Frozen contract, additive; checked against the signed contract-bound event. */
   contract_snapshot?: Record<string, unknown> | null;
+  policy_snapshot_sha256?: string | null;
   producer: "privileged_controller";
   task_id: string;
   attempt_number: number;
@@ -315,6 +349,80 @@ interface DevTaskControllerEvidenceV2 {
   agent_run_id: string | null;
   repository_state?: RepositoryStateEvidenceV1 | null;
   test_integrity_policy?: TestIntegrityPolicyEvidenceV1;
+}
+
+export interface VerdictArtifactV1 {
+  schema_version: "verdict-artifact@1.0";
+  created_at: string;
+  source_bundle: EvidenceBundle;
+  bindings: {
+    charter_sha256: string; policy_sha256: string; execution_evidence_sha256: string;
+    evidence_package_sha256: string; verifier_build_sha256: string;
+  };
+  decision: {
+    verdict: EvidenceBundle["outcome"]; claim_ladder: EvidenceBundle["claim_ladder"];
+    reason_codes: string[]; evidence_pointers: string[];
+  };
+  signature: { scheme: "embedded-evidence-package-ed25519"; signer_key_id: string; value: string };
+}
+
+function sha256Canonical(value: unknown): string {
+  return "sha256:" + createHash("sha256").update(canonicalEvidenceJson(value)).digest("hex");
+}
+
+function verdictReasonCodes(bundle: EvidenceBundle): string[] {
+  const derived = deriveDevTaskV2Outcome(bundle.trace_events, bundle.controller_evidence!);
+  const reasons = [`outcome_${derived}`];
+  if (derived !== "verified") reasons.push("required_evidence_not_fully_satisfied");
+  if (!bundle.observer_receipt) reasons.push("independent_observer_not_attached");
+  if (!bundle.approval_attestation) reasons.push("human_approval_attestation_not_attached");
+  return reasons;
+}
+
+export function buildVerdictArtifactV1(bundle: EvidenceBundle, verifierBuildSha256: string): VerdictArtifactV1 {
+  if (!isDevTaskV2Schema(bundle.schema_version) || !bundle.controller_evidence) throw new Error("unsupported_verdict_source");
+  const policyHash = bundle.controller_evidence.policy_snapshot_sha256;
+  if (!policyHash) throw new Error("missing_frozen_policy_hash");
+  const normalizedPolicyHash = /^[0-9a-f]{64}$/.test(policyHash) ? `sha256:${policyHash}` : policyHash;
+  if (!/^sha256:[0-9a-f]{64}$/.test(normalizedPolicyHash)) throw new Error("invalid_frozen_policy_hash");
+  if (!bundle.controller_evidence.contract_snapshot) throw new Error("missing_frozen_charter");
+  if (!/^sha256:[0-9a-f]{64}$/.test(verifierBuildSha256)) throw new Error("invalid_verifier_build_hash");
+  if (!bundle.signer_key_id) throw new Error("missing_signer_key_id");
+  const executionCore = {
+    trace_events: bundle.trace_events, trace_hash_chain: bundle.trace_hash_chain,
+    controller_evidence: bundle.controller_evidence, required_evidence: bundle.required_evidence,
+  };
+  const verdict = deriveDevTaskV2Outcome(bundle.trace_events, bundle.controller_evidence);
+  const claimLadder = deriveApprovalClaimLadder(verdict, bundle.controller_evidence.approval_reference);
+  return {
+    schema_version: "verdict-artifact@1.0", created_at: bundle.executed_at, source_bundle: bundle,
+    bindings: {
+      charter_sha256: sha256Canonical(bundle.controller_evidence.contract_snapshot), policy_sha256: normalizedPolicyHash,
+      execution_evidence_sha256: sha256Canonical(executionCore), evidence_package_sha256: sha256Canonical(bundle),
+      verifier_build_sha256: verifierBuildSha256,
+    },
+    decision: {
+      verdict, claim_ladder: claimLadder, reason_codes: verdictReasonCodes(bundle),
+      evidence_pointers: ["/outcome", "/claim_ladder", "/required_evidence", "/controller_evidence", "/trace_events"],
+    },
+    signature: { scheme: "embedded-evidence-package-ed25519", signer_key_id: bundle.signer_key_id, value: bundle.signature },
+  };
+}
+
+export function verifyVerdictArtifactV1(
+  artifact: VerdictArtifactV1, trustedPublicKey: string, verifierBuildSha256: string, trustedApprovalPublicKey?: string,
+): { ok: boolean; reason?: string } {
+  if (artifact.schema_version !== "verdict-artifact@1.0") return { ok: false, reason: "unsupported_verdict_schema" };
+  let expected: VerdictArtifactV1;
+  try { expected = buildVerdictArtifactV1(artifact.source_bundle, verifierBuildSha256); }
+  catch (error) { return { ok: false, reason: error instanceof Error ? error.message : "invalid_verdict_artifact" }; }
+  const source = verifyBundleObject(artifact.source_bundle, trustedPublicKey, trustedApprovalPublicKey);
+  if (!source.ok && source.reason !== "non_verified_outcome:failed" && source.reason !== "non_verified_outcome:inconclusive") {
+    return { ok: false, reason: `source_bundle_${source.reason ?? "verification_failed"}` };
+  }
+  return canonicalEvidenceJson(artifact) === canonicalEvidenceJson(expected)
+    ? { ok: true }
+    : { ok: false, reason: "verdict_derivation_mismatch" };
 }
 
 interface TestIntegrityPolicyEvidenceV1 {
@@ -722,7 +830,8 @@ interface EvidenceRef {
 interface DevTaskNegativeClaimTraceEvent {
   task_id: string;
   attempt_number: number;
-  claim: "no_network_outside_scope" | "no_secret_access" | "no_write_outside_allowlist" | (string & {});
+  claim: "no_network_outside_scope" | "no_secret_access" | "no_write_outside_allowlist"
+    | "no_irreversible_effect_outside_allowed_targets" | (string & {});
   verified_by: string;
   strength: TrustLevel;
   result: boolean;
@@ -1207,10 +1316,11 @@ const CLAIM_LADDER_RANK: Record<EvidenceBundle["claim_ladder"], number> = { L0: 
 function claimLadderRank(ladder: EvidenceBundle["claim_ladder"]): number { return CLAIM_LADDER_RANK[ladder]; }
 
 export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"] } {
-  // rfc3161_timestamp/observer_receipt werden IMMER erst nach dem Signieren angehaengt -- waren
-  // nie Teil der signierten Nutzlast, muessen hier ebenso ausgeschlossen werden (siehe
-  // verifyRfc3161Binding()/crossCheckObserverReceipt() fuer die getrennten Zusatzpruefungen).
-  const { signature, public_key, rfc3161_timestamp, approval_attestation, observer_receipt, ...payload } = bundle;
+  // rfc3161_timestamp/observer_receipt/epistemic_gate werden IMMER erst nach dem Signieren
+  // angehaengt -- waren nie Teil der signierten Nutzlast, muessen hier ebenso ausgeschlossen
+  // werden (siehe verifyRfc3161Binding()/crossCheckObserverReceipt()/verifyEpistemicGateBinding()
+  // fuer die getrennten Zusatzpruefungen).
+  const { signature, public_key, rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...payload } = bundle;
 
   // Fail-closed: siehe Kommentar bei DEVTASK_V2_SCHEMA_VERSIONS oben.
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
@@ -1248,7 +1358,7 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
     // erst NACH attachApprovalAttestation() angehaengt -- bundle_sha256 wurde ohne dieses Feld
     // berechnet. Ohne den Ausschluss haette jedes COMPLETED, freigegebene UND vom Observer
     // bezeugte Bundle hier faelschlich "approval_bundle_hash_mismatch" geliefert.
-    const { approval_attestation: _ignored, observer_receipt: _observerReceiptIgnored, ...bundleWithoutApproval } = bundle;
+    const { approval_attestation: _ignored, observer_receipt: _observerReceiptIgnored, epistemic_gate: _epistemicGateIgnored, ...bundleWithoutApproval } = bundle;
     if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) return { ok: false, reason: "untrusted_approval_signer" };
     if (approvalPayload.bundle_sha256 !== sha256(JSON.stringify(bundleWithoutApproval))) return { ok: false, reason: "approval_bundle_hash_mismatch" };
     if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) return { ok: false, reason: "invalid_approval_signature" };
@@ -1540,7 +1650,10 @@ function reportedAnchorStatus(anchor: unknown): ObserverCheckResult["anchor_stat
  *  `observer_reported_bitcoin_confirmed` ausgegeben und nicht als eigener Bitcoin-Nachweis. */
 export async function crossCheckObserverReceipt(bundle: EvidenceBundle): Promise<ObserverCheckResult> {
   if (!bundle.observer_receipt) return { ok: false, reason: "not_applicable_no_observer_receipt" };
-  const { observer_receipt, ...withoutObserverReceipt } = bundle;
+  // 26.09.2026: epistemic_gate haengt NACH observer_receipt an (attachEpistemicGateAttestation(),
+  // host/receipts.server.ts) -- gleicher Ausschluss noetig wie rfc3161_timestamp/approval_attestation
+  // oben, sonst kennt der hier gehashte Stand ein Feld nicht, das beim Original-Attach noch fehlte.
+  const { observer_receipt, epistemic_gate, ...withoutObserverReceipt } = bundle;
   const expectedBundleSha256 = sha256(JSON.stringify(withoutObserverReceipt));
 
   let response: Response;
@@ -1678,7 +1791,9 @@ async function main() {
     return;
   }
 
-  const bundle = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle;
+  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1;
+  const verdictArtifact = input.schema_version === "verdict-artifact@1.0" ? input : null;
+  const bundle = verdictArtifact ? verdictArtifact.source_bundle : input as EvidenceBundle;
   let trustedPublicKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
   let trustedApprovalPublicKey = process.argv[4] ? readFileSync(process.argv[4], "utf-8") : undefined;
 
@@ -1691,6 +1806,23 @@ async function main() {
     const consensus = await crossCheckTrustAnchor("human_approval");
     printConsensus("human_approval", consensus);
     if (consensus.agreed_public_key_pem) trustedApprovalPublicKey = consensus.agreed_public_key_pem;
+  }
+
+  if (verdictArtifact) {
+    if (!trustedPublicKey) {
+      console.error("Verdict artifact verification failed: trusted evidence key unavailable");
+      process.exitCode = 2;
+      return;
+    }
+    const ownBuildHash = "sha256:" + createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
+    const verdictResult = verifyVerdictArtifactV1(verdictArtifact, trustedPublicKey, ownBuildHash, trustedApprovalPublicKey);
+    if (!verdictResult.ok) {
+      console.error(`Verdict artifact verification failed: ${verdictResult.reason}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`Verdict artifact ${bundle.bundle_id} verified. Verdict=${verdictArtifact.decision.verdict}, Claim-Ladder=${verdictArtifact.decision.claim_ladder}`);
+    return;
   }
 
   const result = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey);
@@ -1994,6 +2126,7 @@ export function buildCustomerReadingViewDe(
       no_network_outside_scope: "Kein Netzwerkzugriff ausserhalb der erlaubten Grenzen",
       no_secret_access: "Kein Zugriff auf geheime Zugangsdaten",
       no_write_outside_allowlist: "Keine Schreibzugriffe ausserhalb der erlaubten Pfade",
+      no_irreversible_effect_outside_allowed_targets: "Kein irreversibler Effekt ausserhalb erlaubter Ziele (Netzwerk + Schreibzugriff zusammen)",
     };
     const strengths: Record<string, string> = {
       policy_derived: "Aus der Konfiguration abgeleitet; nicht durch Laufzeitbeobachtung oder unabhaengig bestaetigt",

@@ -194,7 +194,7 @@ def validate_spec_v1(bundle: dict[str, Any]) -> str | None:
     for field in required:
         if field not in bundle or bundle[field] is None:
             return f"spec_validation_failed:missing_required_field:{field}"
-    allowed = set(required) | {"customer_evidence", "rfc3161_timestamp", "approval_attestation", "observer_receipt"}
+    allowed = set(required) | {"customer_evidence", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate"}
     if bundle.get("spec_version") != DEVTASK_EVIDENCE_SPEC_VERSION:
         return "spec_validation_failed:unsupported_spec_version"
     if bundle.get("capability") != DEVTASK_EVIDENCE_SPEC_VERSION:
@@ -301,7 +301,7 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
     embedded = bundle.get("public_key")
     if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
         return False, "untrusted_signer"
-    payload = {key: value for key, value in bundle.items() if key not in ("signature", "public_key", "rfc3161_timestamp", "approval_attestation", "observer_receipt")}
+    payload = {key: value for key, value in bundle.items() if key not in ("signature", "public_key", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")}
     signed_payload = canonical_evidence_bytes(payload) if bundle.get("schema_version") == "evidence-package@2.2" else compact(payload)
     if not openssl_verify(trusted_key, signed_payload, str(bundle.get("signature", ""))):
         return False, "invalid_signature"
@@ -332,10 +332,33 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
         # 06.09.2026 (identischer Fix wie verify.ts/evidenceBundle.server.ts): observer_receipt wird
         # in der Produktions-Pipeline immer erst NACH attachApprovalAttestation() angehaengt --
         # bundle_sha256 wurde ohne dieses Feld berechnet und muss hier ebenso ausgeschlossen werden.
-        without_approval = {key: value for key, value in bundle.items() if key not in ("approval_attestation", "observer_receipt")}
+        # 26.09.2026: epistemic_gate haengt noch spaeter an (nach observer_receipt), gleicher Grund.
+        without_approval = {key: value for key, value in bundle.items() if key not in ("approval_attestation", "observer_receipt", "epistemic_gate")}
         if attestation.get("bundle_sha256") != sha256_bytes(compact(without_approval)):
             return False, "approval_scope_mismatch"
     return True, "verified"
+
+
+# 26.09.2026 (Iman/EMILIA-Protocol, SCITT-Mailingliste): Python-Parity zu
+# verifyEpistemicGateBinding() in host/receipts.server.ts / verify.ts. verify() oben ruft diese
+# Funktion NICHT selbst auf -- identisches Muster wie die TS-Seite: eine separate, explizit
+# aufzurufende Pruefung, kein Teil der Kernsignaturpruefung. compact() reproduziert JS' schlichtes
+# JSON.stringify() bytegleich (keine Schluessel-Sortierung, kein ASCII-Escaping), deshalb matcht
+# der hier neu berechnete Hash exakt den serverseitig zum Anhaengezeitpunkt berechneten.
+def verify_epistemic_gate_binding(bundle: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    attestation = bundle.get("epistemic_gate")
+    if not attestation:
+        return False, "epistemic_gate_not_attached"
+    public_key = attestation.get("public_key")
+    if public_key != trusted_key or attestation.get("signer_key_id") != key_id(trusted_key):
+        return False, "untrusted_epistemic_gate_signer"
+    without_gate = {key: value for key, value in bundle.items() if key != "epistemic_gate"}
+    if attestation.get("bundle_sha256") != sha256_bytes(compact(without_gate)):
+        return False, "epistemic_gate_hash_mismatch"
+    payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
+    if not openssl_verify(public_key, compact(payload), str(attestation.get("signature", ""))):
+        return False, "invalid_epistemic_gate_signature"
+    return True, None
 
 
 # Bauanleitung Evidence-Standard, Punkt 3 (06.09.2026): "Proof Policies" -- Mindestbeweislage vor
