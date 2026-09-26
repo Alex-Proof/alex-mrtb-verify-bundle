@@ -420,9 +420,75 @@ export function verifyVerdictArtifactV1(
   if (!source.ok && source.reason !== "non_verified_outcome:failed" && source.reason !== "non_verified_outcome:inconclusive") {
     return { ok: false, reason: `source_bundle_${source.reason ?? "verification_failed"}` };
   }
+  // 26.09.2026 (Iman/EMILIA-Protocol -- realer Nachweis: eine geaenderte epistemic_gate.gate.decision
+  // blieb hier bisher unentdeckt, verifyEpistemicGateBinding() wurde nie automatisch aufgerufen).
+  // Identischer Diff wie core/mrtb/evidenceBundle.server.ts -- bei Aenderung dort auch hier nachziehen.
+  if (artifact.source_bundle.epistemic_gate) {
+    const gateCheck = verifyEpistemicGateBinding(artifact.source_bundle, trustedPublicKey);
+    if (!gateCheck.ok) return { ok: false, reason: `epistemic_gate_${gateCheck.reason ?? "invalid"}` };
+  }
   return canonicalEvidenceJson(artifact) === canonicalEvidenceJson(expected)
     ? { ok: true }
     : { ok: false, reason: "verdict_derivation_mismatch" };
+}
+
+// vNext 4.8 "Agent Passport" (kein Shared Import, siehe Datei-Header oben -- identischer Diff wie
+// core/agentPassportHistoryVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
+export interface AgentPassportHistoryEntryV1 {
+  identityLineId: string;
+  sequence: number;
+  receiptHash: string | null;
+  verdictHash: string | null;
+  outcome: "verified" | "failed" | "inconclusive";
+  claimLadder: ClaimLadder;
+  policyProfileHash: string;
+  recordedAt: string;
+  prevHash: string;
+  entryHash: string;
+}
+
+export interface AgentPassportHistoryExportV1 {
+  schema_version: "agent-passport-history@1.0";
+  identity_line_id: string;
+  entries: AgentPassportHistoryEntryV1[];
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+const PASSPORT_HISTORY_GENESIS_HASH = "0".repeat(64);
+
+function recomputePassportHistoryEntryHash(entry: AgentPassportHistoryEntryV1): string {
+  const body = {
+    identity_line_id: entry.identityLineId, sequence: entry.sequence,
+    receipt_hash: entry.receiptHash, verdict_hash: entry.verdictHash,
+    outcome: entry.outcome, claim_ladder: entry.claimLadder,
+    policy_profile_hash: entry.policyProfileHash, recorded_at: entry.recordedAt,
+  };
+  return createHash("sha256").update(entry.prevHash + canonical(body)).digest("hex");
+}
+
+/** Offline: kein DB-Zugriff, kein Netzwerk. Prueft die Hash-Kette (jeder entry_hash rekonstruierbar
+ *  aus prev_hash + kanonisiertem Eintrag, Sequenz 0 = Genesis, luecken-/sprungfrei) und die
+ *  Export-Signatur ueber die gesamte Kette gegen trustedPublicKey. */
+export function verifyAgentPassportHistoryV1(bundle: AgentPassportHistoryExportV1, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  if (bundle.schema_version !== "agent-passport-history@1.0") return { ok: false, reason: "unsupported_schema_version" };
+  if (bundle.public_key !== trustedPublicKey) return { ok: false, reason: "untrusted_signer" };
+
+  let expectedPrev = PASSPORT_HISTORY_GENESIS_HASH;
+  for (let i = 0; i < bundle.entries.length; i++) {
+    const entry = bundle.entries[i];
+    if (entry.identityLineId !== bundle.identity_line_id) return { ok: false, reason: `identity_line_id_mismatch:${entry.sequence}` };
+    if (entry.sequence !== i) return { ok: false, reason: `sequence_gap:${entry.sequence}` };
+    if (entry.prevHash !== expectedPrev) return { ok: false, reason: `chain_broken:${entry.sequence}` };
+    const recomputed = recomputePassportHistoryEntryHash(entry);
+    if (recomputed !== entry.entryHash) return { ok: false, reason: `entry_hash_mismatch:${entry.sequence}` };
+    expectedPrev = entry.entryHash;
+  }
+
+  const signedBytes = Buffer.from(canonical({ identity_line_id: bundle.identity_line_id, entries: bundle.entries }), "utf8");
+  const validSignature = verify(null, signedBytes, trustedPublicKey, Buffer.from(bundle.signature, "base64"));
+  return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
 }
 
 interface TestIntegrityPolicyEvidenceV1 {
@@ -1791,7 +1857,25 @@ async function main() {
     return;
   }
 
-  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1;
+  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1;
+
+  if (input.schema_version === "agent-passport-history@1.0") {
+    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    if (!trustedKey) {
+      console.error("Agent passport history verification failed: trusted public key required (argv[3])");
+      process.exitCode = 2;
+      return;
+    }
+    const passportResult = verifyAgentPassportHistoryV1(input, trustedKey);
+    if (!passportResult.ok) {
+      console.error(`Agent passport history verification failed: ${passportResult.reason}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`Agent passport history ${input.identity_line_id} verified offline. ${input.entries.length} entr${input.entries.length === 1 ? "y" : "ies"}.`);
+    return;
+  }
+
   const verdictArtifact = input.schema_version === "verdict-artifact@1.0" ? input : null;
   const bundle = verdictArtifact ? verdictArtifact.source_bundle : input as EvidenceBundle;
   let trustedPublicKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
@@ -2127,6 +2211,8 @@ export function buildCustomerReadingViewDe(
       no_secret_access: "Kein Zugriff auf geheime Zugangsdaten",
       no_write_outside_allowlist: "Keine Schreibzugriffe ausserhalb der erlaubten Pfade",
       no_irreversible_effect_outside_allowed_targets: "Kein irreversibler Effekt ausserhalb erlaubter Ziele (Netzwerk + Schreibzugriff zusammen)",
+      no_capability_added_mid_run: "Keine Capability nach Laufstart hinzugefuegt",
+      no_observed_secret_egress: "Kein beobachteter Secret-Egress an der Credential-Zugriffsgrenze (keine Netzwerk-Payload-Inspektion)",
     };
     const strengths: Record<string, string> = {
       policy_derived: "Aus der Konfiguration abgeleitet; nicht durch Laufzeitbeobachtung oder unabhaengig bestaetigt",

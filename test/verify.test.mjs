@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { canonicalEvidenceJson, evaluateProofPolicy, evaluateTrustRequirement, validateDevTaskEvidenceSpecV1, verifyBundleObject, verifyValidationAttestation, verifyReviewerAttestation, crossCheckObserverReceipt } from "../dist/verify.js";
+import { canonicalEvidenceJson, evaluateProofPolicy, evaluateTrustRequirement, validateDevTaskEvidenceSpecV1, verifyBundleObject, verifyValidationAttestation, verifyReviewerAttestation, crossCheckObserverReceipt, verifyAgentPassportHistoryV1 } from "../dist/verify.js";
 
 // 06.09.2026: einzige bewusste strukturelle Abweichung von der privaten Kopie in
 // tools/verify-bundle/test/verify.test.mjs -- dort ist der Pfad "../../../spec/..." (drei Ebenen,
@@ -97,6 +97,64 @@ test("rejects a verified claim contradicted by its trace", () => {
     ok: false,
     reason: "trace_outcome_mismatch:declared=verified:derived=failed",
   });
+});
+
+// vNext 4.8 "Agent Passport": append-only, offline pruefbare Historie (core/agentPassportHistory.server.ts
+// / core/agentPassportHistoryVerify.server.ts im privaten Repo). Kein Shared Import mit diesem
+// eigenstaendigen Verifier (siehe verify.ts Header) -- die Kette wird hier bewusst manuell nachgebaut,
+// exakt wie der reale Aufbau in appendPassportHistoryEntry().
+function passportEntryHash(prevHash, entry) {
+  const body = {
+    identity_line_id: entry.identityLineId, sequence: entry.sequence,
+    receipt_hash: entry.receiptHash, verdict_hash: entry.verdictHash,
+    outcome: entry.outcome, claim_ladder: entry.claimLadder,
+    policy_profile_hash: entry.policyProfileHash, recorded_at: entry.recordedAt,
+  };
+  return sha256(prevHash + canonical(body));
+}
+
+function signedPassportHistory(identityLineId, entryInputs) {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const genesis = "0".repeat(64);
+  const entries = [];
+  let prevHash = genesis;
+  entryInputs.forEach((input, sequence) => {
+    const entry = { identityLineId, sequence, prevHash, ...input };
+    entry.entryHash = passportEntryHash(prevHash, entry);
+    entries.push(entry);
+    prevHash = entry.entryHash;
+  });
+  const signature = sign(null, Buffer.from(canonical({ identity_line_id: identityLineId, entries }), "utf8"), privateKey).toString("base64");
+  return {
+    schema_version: "agent-passport-history@1.0", identity_line_id: identityLineId, entries,
+    signer_key_id: "test-signer", public_key: publicKey.export({ type: "spki", format: "pem" }), signature,
+  };
+}
+
+test("Agent Passport History: verifiziert eine korrekt signierte, luecken- und sprungfreie Kette offline", () => {
+  const bundle = signedPassportHistory("line-a", [
+    { receiptHash: "r0", verdictHash: "v0", outcome: "verified", claimLadder: "L2", policyProfileHash: "p0", recordedAt: "2026-01-01T00:00:00.000Z" },
+    { receiptHash: "r1", verdictHash: null, outcome: "inconclusive", claimLadder: "L1", policyProfileHash: "p0", recordedAt: "2026-01-02T00:00:00.000Z" },
+  ]);
+  assert.deepEqual(verifyAgentPassportHistoryV1(bundle, bundle.public_key), { ok: true });
+});
+
+test("Agent Passport History: lehnt einen nachtraeglich veraenderten Eintrag ab (Kette bricht)", () => {
+  const bundle = signedPassportHistory("line-b", [
+    { receiptHash: "r0", verdictHash: "v0", outcome: "verified", claimLadder: "L2", policyProfileHash: "p0", recordedAt: "2026-01-01T00:00:00.000Z" },
+  ]);
+  bundle.entries[0].outcome = "failed";
+  const result = verifyAgentPassportHistoryV1(bundle, bundle.public_key);
+  assert.equal(result.ok, false);
+});
+
+test("Agent Passport History: lehnt einen fremden/nicht vertrauenswuerdigen Schluessel ab", () => {
+  const bundle = signedPassportHistory("line-c", [
+    { receiptHash: "r0", verdictHash: "v0", outcome: "verified", claimLadder: "L2", policyProfileHash: "p0", recordedAt: "2026-01-01T00:00:00.000Z" },
+  ]);
+  const { publicKey: otherPublicKey } = generateKeyPairSync("ed25519");
+  const result = verifyAgentPassportHistoryV1(bundle, otherPublicKey.export({ type: "spki", format: "pem" }));
+  assert.deepEqual(result, { ok: false, reason: "untrusted_signer" });
 });
 
 test("rejects a self-signed forgery that declares an unrecognized evidence-package schema version", () => {

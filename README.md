@@ -326,3 +326,21 @@ Gate-Ergebnis -> `invalid_epistemic_gate_signature`, aus einem anderen Bundle re
 Ausgelöst durch eine unabhängige Prüfung von Iman Schrock (EMILIA-Protocol, SCITT-IETF-Mailingliste),
 die genau diese drei Manipulationsfälle angefragt hatte und dabei gegen die veraltete Kopie dieses
 Repos getestet hätte.
+
+**Zuletzt bearbeitet:** 2026-09-26 (Nachtrag, gleicher Tag)
+**Von:** Claude Code (MERIDIAN)
+Zwei weitere reale Funde aus Imans Prüfung gegen den frisch gesyncten Stand:
+
+1. `verifyVerdictArtifactV1()` prüfte `epistemic_gate` bisher gar nicht mit -- ein an ein Verdict
+   Artifact angehängtes, nachträglich geändertes Gate (`decision` umgeschrieben) verifizierte
+   weiterhin `ok: true`, obwohl `verifyEpistemicGateBinding()` den Tamper separat aufgerufen korrekt
+   erkannt hätte. Niemand rief sie automatisch auf. Jetzt: sobald ein `epistemic_gate` angehängt ist,
+   muss es gültig sein, sonst scheitert das gesamte Verdict (`epistemic_gate_<reason>`). Artefakte
+   ganz ohne dieses Feld (historische Bundles) bleiben unverändert unberührt -- keine Pflicht zur
+   Anwesenheit, nur zur Gültigkeit bei Anwesenheit. Zwei neue Tests in `test/epistemic-gate.test.mjs`.
+2. `verifyAgentPassportHistoryV1()` und seine drei Tests aus der letzten Synchronisierung nachgezogen
+   (war zuvor noch unveröffentlichter, privater Code -- jetzt selbst committed und getestet).
+
+Das Gate bleibt dabei eine Selbstauskunft: es authentifiziert einen Bericht darüber, welche Prüfungen
+gelaufen sind, es beweist nicht unabhängig, dass sie gelaufen sind. Das ist eine bewusste, ehrlich
+benannte Grenze (siehe "Deliberate limits" oben), keine Lücke, die dieser Fix schließt.
