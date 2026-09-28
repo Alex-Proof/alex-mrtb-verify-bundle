@@ -138,6 +138,10 @@ Bundle selbst. Dieser Endpunkt liefert das aktuell gültige, disk-persistente Ed
 des Evidence-Signierdienstes; es überlebt Server-Neustarts (vor dem 29.08.2026 war das nicht der
 Fall, siehe Changelog unten).
 
+Was genau diese Identität ist (kein separates Issuer-Konzept, nur der Schlüssel selbst), was bei
+einer Rotation mit alten Bundles passiert, und was dabei automatisiert ist und was nicht: siehe
+[TRUST-BOUNDARY.md](TRUST-BOUNDARY.md).
+
 Expected results:
 
 - the test suite passes;
