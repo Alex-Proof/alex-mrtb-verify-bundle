@@ -17,6 +17,7 @@
     "independence/",
     "bundle-*.json",
     "epistemic-gate-*.json",
+    "evidence-package-2-3-*.json",
     "network-egress-deny-canary-14.json",
     "cline-acp-canary-13.json"
   ],

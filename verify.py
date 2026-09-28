@@ -181,7 +181,11 @@ def derive(bundle: dict[str, Any]) -> str:
     return "verified" if all(basics) else "inconclusive"
 
 
-DEVTASK_V2_SCHEMA_VERSIONS = ("evidence-package@2.0", "evidence-package@2.1", "evidence-package@2.2")
+# 28.09.2026: "evidence-package@2.3" ergaenzt (Iman/EMILIA-Feedback, SCITT-Mailingliste) -- Parity
+# zu DEVTASK_V2_SCHEMA_VERSIONS in evidenceBundle.server.ts/verify.ts. 2.3 erzwingt zusaetzlich ein
+# gueltiges epistemic_gate, siehe EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS unten.
+DEVTASK_V2_SCHEMA_VERSIONS = ("evidence-package@2.0", "evidence-package@2.1", "evidence-package@2.2", "evidence-package@2.3")
+EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS = ("evidence-package@2.3",)
 DEVTASK_EVIDENCE_SPEC_VERSION = "devtask.execution@1.0"
 
 
@@ -292,7 +296,9 @@ def claim_evidence_ref_assessments(bundle: dict[str, Any]) -> list[dict[str, Any
 def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -> tuple[bool, str]:
     if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or bundle.get("capability") != "devtask.execution@1.0":
         return False, "unsupported_schema_or_capability"
-    if bundle.get("schema_version") == "evidence-package@2.2":
+    # 2.3 ist "2.2 + Pflicht-Gate": erbt dieselbe Spec-Validierung/Kanonisierung wie 2.2, keine
+    # eigene, dritte Nutzlastform (Parity zu verifyBundleObject() in verify.ts).
+    if bundle.get("schema_version") in ("evidence-package@2.2", "evidence-package@2.3"):
         spec_error = validate_spec_v1(bundle)
         if spec_error:
             return False, spec_error
@@ -302,9 +308,16 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
     if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
         return False, "untrusted_signer"
     payload = {key: value for key, value in bundle.items() if key not in ("signature", "public_key", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")}
-    signed_payload = canonical_evidence_bytes(payload) if bundle.get("schema_version") == "evidence-package@2.2" else compact(payload)
+    signed_payload = canonical_evidence_bytes(payload) if bundle.get("schema_version") in ("evidence-package@2.2", "evidence-package@2.3") else compact(payload)
     if not openssl_verify(trusted_key, signed_payload, str(bundle.get("signature", ""))):
         return False, "invalid_signature"
+    # 28.09.2026 (Iman/EMILIA-Feedback): fuer evidence-package@2.3 ist epistemic_gate PFLICHT, nicht
+    # nur additiv-optional wie fuer 2.0-2.2 (Parity zu verifyBundleObject() in verify.ts). Laeuft im
+    # blossen Bundle-Check, nicht nur im Verdict-Artefakt-Pfad.
+    if bundle.get("schema_version") in EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS:
+        gate_ok, gate_reason = verify_epistemic_gate_binding(bundle, trusted_key)
+        if not gate_ok:
+            return False, f"epistemic_gate_{gate_reason or 'invalid'}"
     events, chain = bundle.get("trace_events", []), bundle.get("trace_hash_chain", [])
     previous, expected_chain = "genesis", []
     for raw in events:

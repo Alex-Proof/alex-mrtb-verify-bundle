@@ -27,7 +27,12 @@ export interface ReviewerAttestationV1 {
 // uebersprungen werden, die Signaturpruefung darunter verifizierte dann nur noch gegen den im
 // Bundle selbst mitgelieferten public_key. Bei jeder Aenderung hier: identische Aenderung auch in
 // evidenceBundle.server.ts, sonst laeuft dieser oeffentliche Verifier wieder auseinander.
-const DEVTASK_V2_SCHEMA_VERSIONS = new Set(["evidence-package@2.0", "evidence-package@2.1", "evidence-package@2.2"]);
+// 27.09.2026 (Iman/EMILIA-Feedback, SCITT-Mailingliste): "evidence-package@2.3" ergaenzt -- neue
+// Verifikations-Stufe mit PFLICHT-epistemic_gate, siehe EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS und
+// identischer Kommentar in evidenceBundle.server.ts fuer die vollstaendige Liste der bewusst NICHT
+// mitgezogenen Stellen (Evidence-Graph-Schreibpfad, JSON-Schema, verify.py).
+const DEVTASK_V2_SCHEMA_VERSIONS = new Set(["evidence-package@2.0", "evidence-package@2.1", "evidence-package@2.2", "evidence-package@2.3"]);
+const EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS = new Set(["evidence-package@2.3"]);
 const DEVTASK_EVIDENCE_SPEC_VERSION = "devtask.execution@1.0" as const;
 function isDevTaskV2Schema(v: string | undefined): boolean {
   return v !== undefined && DEVTASK_V2_SCHEMA_VERSIONS.has(v);
@@ -86,7 +91,7 @@ export interface Rfc3161Timestamp {
 }
 
 export interface EvidenceBundle {
-  schema_version?: "evidence-package@2.0" | "evidence-package@2.1" | "evidence-package@2.2";
+  schema_version?: "evidence-package@2.0" | "evidence-package@2.1" | "evidence-package@2.2" | "evidence-package@2.3";
   spec_version?: typeof DEVTASK_EVIDENCE_SPEC_VERSION;
   bundle_id: string;
   capability: string;
@@ -423,6 +428,11 @@ export function verifyVerdictArtifactV1(
   // 26.09.2026 (Iman/EMILIA-Protocol -- realer Nachweis: eine geaenderte epistemic_gate.gate.decision
   // blieb hier bisher unentdeckt, verifyEpistemicGateBinding() wurde nie automatisch aufgerufen).
   // Identischer Diff wie core/mrtb/evidenceBundle.server.ts -- bei Aenderung dort auch hier nachziehen.
+  // 27.09.2026: fuer evidence-package@2.3 wird ANWESENHEIT jetzt Pflicht (identischer Diff wie
+  // core/mrtb/evidenceBundle.server.ts, siehe dortiger ausfuehrlicherer Kommentar).
+  if (EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS.has(artifact.source_bundle.schema_version ?? "") && !artifact.source_bundle.epistemic_gate) {
+    return { ok: false, reason: "epistemic_gate_not_attached" };
+  }
   if (artifact.source_bundle.epistemic_gate) {
     const gateCheck = verifyEpistemicGateBinding(artifact.source_bundle, trustedPublicKey);
     if (!gateCheck.ok) return { ok: false, reason: `epistemic_gate_${gateCheck.reason ?? "invalid"}` };
@@ -434,6 +444,8 @@ export function verifyVerdictArtifactV1(
 
 // vNext 4.8 "Agent Passport" (kein Shared Import, siehe Datei-Header oben -- identischer Diff wie
 // core/agentPassportHistoryVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
+// tests/dev-workflow/verify-bundle-duplicate-logic-drift.test.ts (27.09.2026) faehrt beide
+// Implementierungen gegen dieselben Fixtures und schlaegt bei Abweichung fehl.
 export interface AgentPassportHistoryEntryV1 {
   identityLineId: string;
   sequence: number;
@@ -488,6 +500,69 @@ export function verifyAgentPassportHistoryV1(bundle: AgentPassportHistoryExportV
 
   const signedBytes = Buffer.from(canonical({ identity_line_id: bundle.identity_line_id, entries: bundle.entries }), "utf8");
   const validSignature = verify(null, signedBytes, trustedPublicKey, Buffer.from(bundle.signature, "base64"));
+  return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
+}
+
+// vNext 4.9 "Challenge Protocol" (kein Shared Import, siehe Datei-Header oben -- identischer Diff
+// wie core/challengeProtocolVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
+// Gleicher Drift-Test wie oben bei Agent Passport:
+// tests/dev-workflow/verify-bundle-duplicate-logic-drift.test.ts.
+// Geschwister von VerdictArtifactV1 oben, NICHT dessen Erweiterung: eigenes schema_version, bindet
+// per Hash an receipt_content_sha256/evidence_package_sha256 statt Receipt/Evidence-Bundle erneut
+// einzubetten (beide liegen als eigene Dateien im selben Akte-ZIP, manuell nachrechenbar -- gleiches
+// Muster wie receipt-policy.json/policy_hash). Nur das Superseding-Receipt (falls CONTRADICTED) ist
+// vollstaendig eingebettet, weil ein offline pruefender Verifier sonst nicht selbst nachrechnen kann,
+// dass es wirklich per supersedes auf dieses Receipt zurueckzeigt.
+type ChallengeReasonCode = "missing_action" | "unauthorized_file" | "unauthorized_network" | "identity"
+  | "completeness" | "charter" | "secret_handling" | "timestamp" | "other";
+type ChallengeResponseOutcome = "SUPPORTED" | "CONTRADICTED" | "NOT_VERIFIABLE";
+
+interface ChallengeSupersedingReceiptV1 {
+  receipt_id: string;
+  supersedes: string | null;
+  [key: string]: unknown;
+}
+
+export interface ChallengeResponseArtifactV1 {
+  schema_version: "challenge-response@1.0";
+  challenge_id: string;
+  receipt_id: string;
+  receipt_content_sha256: string;
+  evidence_package_sha256: string;
+  reason_code: ChallengeReasonCode;
+  claim_pointer: string;
+  raised_statement: string;
+  raised_at: string;
+  outcome: ChallengeResponseOutcome;
+  response_statement: string;
+  response_evidence_pointers: string[];
+  responded_at: string;
+  superseding_receipt: ChallengeSupersedingReceiptV1 | null;
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+/** Offline: kein DB-Zugriff, kein Netzwerk. Prueft (1) dass ein referenziertes Superseding-Receipt
+ *  (nur bei outcome === "CONTRADICTED" vorhanden) wirklich per supersedes auf GENAU dieses Receipt
+ *  zurueckzeigt, und (2) die Signatur ueber die gesamte Nutzlast gegen trustedPublicKey. Die
+ *  Ed25519-Signatur deckt bereits jede Manipulation am eingebetteten Superseding-Receipt ab (Teil
+ *  der signierten Nutzlast) -- kein zweiter, redundanter Hash-Check darauf noetig. */
+export function verifyChallengeResponseArtifactV1(artifact: ChallengeResponseArtifactV1, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  if (artifact.schema_version !== "challenge-response@1.0") return { ok: false, reason: "unsupported_schema_version" };
+  if (artifact.public_key !== trustedPublicKey || artifact.signer_key_id !== `ed25519:${sha256(trustedPublicKey)}`) {
+    return { ok: false, reason: "untrusted_signer" };
+  }
+
+  const hasSuperseding = artifact.superseding_receipt !== null;
+  const shouldHaveSuperseding = artifact.outcome === "CONTRADICTED";
+  if (hasSuperseding !== shouldHaveSuperseding) return { ok: false, reason: "superseding_receipt_outcome_mismatch" };
+  if (hasSuperseding && artifact.superseding_receipt!.supersedes !== artifact.receipt_id) {
+    return { ok: false, reason: "superseding_receipt_does_not_reference_original" };
+  }
+
+  const { signer_key_id, public_key, signature, ...payload } = artifact;
+  const validSignature = verify(null, Buffer.from(canonicalEvidenceJson(payload), "utf8"), public_key, Buffer.from(signature, "base64"));
   return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
 }
 
@@ -1392,7 +1467,9 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
     return { ok: false, reason: "unsupported_schema_version" };
   }
-  if (bundle.schema_version === "evidence-package@2.2") {
+  // 2.3 ist "2.2 + Pflicht-Gate": erbt dieselbe Spec-Validierung/Kanonisierung wie 2.2, keine
+  // eigene, dritte Nutzlastform.
+  if (bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3") {
     const specError = validateDevTaskEvidenceSpecV1(bundle);
     if (specError) return { ok: false, reason: specError };
   }
@@ -1404,7 +1481,8 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
     if (!bundle.controller_evidence) return { ok: false, reason: "missing_controller_evidence" };
   }
 
-  const signedPayload = bundle.schema_version === "evidence-package@2.2" ? canonicalEvidenceJson(payload) : JSON.stringify(payload);
+  const signedPayload = bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3"
+    ? canonicalEvidenceJson(payload) : JSON.stringify(payload);
   const isValidSignature = verify(
     null,
     Buffer.from(signedPayload),
@@ -1414,6 +1492,15 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
 
   if (!isValidSignature) {
     return { ok: false, reason: "invalid_signature" };
+  }
+  // 27.09.2026 (Iman/EMILIA-Feedback): fuer evidence-package@2.3 ist epistemic_gate PFLICHT, nicht
+  // nur additiv-optional wie fuer 2.0-2.2 -- laeuft hier im blossen Bundle-Check, nicht nur im
+  // Verdict-Artefakt-Pfad. isDevTaskV2Schema() oben hat bei fehlendem trustedPublicKey bereits
+  // "missing_trust_anchor" zurueckgegeben, bevor dieser Punkt je erreicht wird -- trustedPublicKey
+  // ist hier fuer jede EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS-Version garantiert gesetzt.
+  if (EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS.has(bundle.schema_version ?? "")) {
+    const gateCheck = verifyEpistemicGateBinding(bundle, trustedPublicKey!);
+    if (!gateCheck.ok) return { ok: false, reason: `epistemic_gate_${gateCheck.reason ?? "invalid"}` };
   }
   if (bundle.approval_attestation_required) {
     if (!approval_attestation) return { ok: false, reason: "missing_approval_attestation" };
@@ -1464,7 +1551,7 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
   }
 
   if (bundle.schema_version === "evidence-package@2.1" ||
-      (bundle.schema_version === "evidence-package@2.2" && bundle.customer_evidence !== undefined)) {
+      ((bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3") && bundle.customer_evidence !== undefined)) {
     if (!bundle.customer_evidence) return { ok: false, reason: "missing_customer_evidence" };
     const expectedSummary = buildCustomerSummaryDe(bundle.customer_evidence);
     if (bundle.customer_evidence.customer_summary !== expectedSummary) {
@@ -1807,6 +1894,9 @@ export interface ProofPolicy {
     human_approval?: "required";
     no_unsupported_required_claims?: boolean;
     independent_witness?: "required";
+    /** 27.09.2026 (Iman/EMILIA-Feedback): identischer Diff wie evidenceBundle.server.ts -- siehe
+     *  dortiger Kommentar fuer die volle Begruendung ("blind-spot coverage", Downgrade-Schutz). */
+    epistemic_gate?: "required";
   };
 }
 
@@ -1822,6 +1912,7 @@ export function evaluateProofPolicy(
   policy: ProofPolicy,
   bundle: EvidenceBundle,
   context: { effectiveClaimLadder: ClaimLadder; verifierChecks: Record<string, string> },
+  trustedPublicKey?: string,
 ): ProofPolicyEvaluation {
   const evaluated: Record<string, { required: unknown; satisfied: boolean }> = {};
   const blockedBy: string[] = [];
@@ -1845,6 +1936,13 @@ export function evaluateProofPolicy(
   if (requires.independent_witness === "required") {
     record("independent_witness", "required", context.verifierChecks.observer_inclusion === "ok");
   }
+  if (requires.epistemic_gate === "required") {
+    // Identischer Diff wie evidenceBundle.server.ts: beide Bedingungen bewusst gleichrangig
+    // UND-verknuepft (Schema-Zugehoerigkeit + unabhaengige Gate-Pruefung), siehe dortiger Kommentar.
+    const hasCapableSchema = bundle.schema_version !== undefined && EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS.has(bundle.schema_version);
+    const gateValid = hasCapableSchema && !!trustedPublicKey && verifyEpistemicGateBinding(bundle, trustedPublicKey).ok;
+    record("epistemic_gate", "required", gateValid);
+  }
   return { policy_id: policy.policy_id, gates_action: policy.gates_action, allowed: blockedBy.length === 0, blocked_by: blockedBy, evaluated };
 }
 
@@ -1857,7 +1955,7 @@ async function main() {
     return;
   }
 
-  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1;
+  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | ChallengeResponseArtifactV1;
 
   if (input.schema_version === "agent-passport-history@1.0") {
     const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
@@ -1873,6 +1971,23 @@ async function main() {
       return;
     }
     console.log(`Agent passport history ${input.identity_line_id} verified offline. ${input.entries.length} entr${input.entries.length === 1 ? "y" : "ies"}.`);
+    return;
+  }
+
+  if (input.schema_version === "challenge-response@1.0") {
+    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    if (!trustedKey) {
+      console.error("Challenge response verification failed: trusted public key required (argv[3])");
+      process.exitCode = 2;
+      return;
+    }
+    const challengeResult = verifyChallengeResponseArtifactV1(input, trustedKey);
+    if (!challengeResult.ok) {
+      console.error(`Challenge response verification failed: ${challengeResult.reason}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`Challenge response ${input.challenge_id} for receipt ${input.receipt_id} verified offline. Outcome=${input.outcome}.`);
     return;
   }
 
@@ -2092,7 +2207,7 @@ async function main() {
   let proofPolicyResult: ProofPolicyEvaluation | null = null;
   if (process.env.ALEX_VERIFY_POLICY_FILE) {
     const policy = JSON.parse(readFileSync(process.env.ALEX_VERIFY_POLICY_FILE, "utf-8")) as ProofPolicy;
-    proofPolicyResult = evaluateProofPolicy(policy, bundle, { effectiveClaimLadder: verifiedClaimLadder, verifierChecks: checks });
+    proofPolicyResult = evaluateProofPolicy(policy, bundle, { effectiveClaimLadder: verifiedClaimLadder, verifierChecks: checks }, trustedPublicKey);
     if (proofPolicyResult.allowed) {
       console.log(`\n✅ Proof-Policy '${proofPolicyResult.policy_id}' erfuellt -- gated action '${proofPolicyResult.gates_action}' ist erlaubt.`);
     } else {

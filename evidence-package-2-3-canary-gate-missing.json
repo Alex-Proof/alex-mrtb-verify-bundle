@@ -1,0 +1,64 @@
+{
+  "schema_version": "evidence-package@2.3",
+  "spec_version": "devtask.execution@1.0",
+  "bundle_id": "evidence-2-3-canary-a",
+  "capability": "devtask.execution@1.0",
+  "run_id": "evidence-2-3-canary-a:1",
+  "claim_ladder": "L2",
+  "executed_at": "2026-09-27T21:54:08.345Z",
+  "trace_events": [
+    "devtask_contract_bound:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"contract_hash\":\"747acb6d5d887fdfc2ec8079c8ae035eb275d9a99def11812db670684e38af43\",\"contract_schema_version\":\"work-contract@1.0\",\"risk_class\":\"R1\"}",
+    "devtask_attempt_started:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"started_at\":\"2026-09-28T00:00:00Z\"}",
+    "devtask_execution_context:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"execution_reference\":\"attempt:1\",\"sandbox_reference\":null}",
+    "devtask_validation:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"validation_status\":\"passed\",\"validation_reference\":\"validation:1\"}",
+    "devtask_diff_evidence:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"diff_stat_sha256\":\"40460da8c882cdc791836fba76009870f960a151287798f1df8af5e963398f84\",\"diff_full_sha256\":\"df087996d45b03e7eb8c133c0298fd98d35113fca26aaba58612fef3cc212cad\",\"scope\":\"diff_stat_and_full\"}",
+    "devtask_outcome:{\"task_id\":\"evidence-2-3-canary-a\",\"attempt_number\":1,\"outcome\":\"ABORTED\",\"completed_at\":\"2026-09-28T00:01:00Z\"}"
+  ],
+  "trace_hash_chain": [
+    "3b873f110851492fc71bc7f10f119995287dbf089cd4fd5da95f67c4f02749c5",
+    "444d2c80fd165ff6ad2deb6156042814db88ff966d1db0b4acf0d90167917b45",
+    "5b25100333b8fbeb6c38d72a0647d9adac611c0876ea7607968aabb4ae99bacc",
+    "44bad0473096c3dc0d4b5bd29882d056e2579ec6bbc89d9db25467d413380381",
+    "7a7f395eba628401064779bdd0299dbb304f46add50d146e52907139bb9e6ec3",
+    "e98418e2481b5a18ddd7a2bd937d4f5f9b27339a9b65a17e4aebc498c7da3174"
+  ],
+  "outcome": "verified",
+  "signer_key_id": "ed25519:6920d2455a0674889932c505bed1e95457a0e0def1879996916d26a419ea0a85",
+  "controller_evidence": {
+    "producer": "privileged_controller",
+    "task_id": "evidence-2-3-canary-a",
+    "attempt_number": 1,
+    "base_commit": "abc",
+    "result_reference": null,
+    "policy_snapshot_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diff_stat_sha256": "40460da8c882cdc791836fba76009870f960a151287798f1df8af5e963398f84",
+    "diff_full": "diff",
+    "diff_full_sha256": "df087996d45b03e7eb8c133c0298fd98d35113fca26aaba58612fef3cc212cad",
+    "execution_reference": "attempt:1",
+    "validation_reference": "validation:1",
+    "approval_reference": null,
+    "sandbox_reference": null,
+    "sandbox_attestation": null,
+    "agent_run_id": null,
+    "contract_snapshot": {
+      "schemaVersion": "work-contract@1.0",
+      "rawText": "Oeffentliches Canary-Bundle fuer evidence-package@2.3 (Iman/EMILIA-Feedback).",
+      "acceptanceCriteria": [
+        "ok"
+      ],
+      "protectExistingTests": true
+    }
+  },
+  "required_evidence": [
+    "contract",
+    "attempt",
+    "execution_context",
+    "validation",
+    "outcome",
+    "base_commit",
+    "diff_full"
+  ],
+  "approval_attestation_required": false,
+  "signature": "9dNdu94CQmM5wHZKrXMu/56a9717MnYjxad/mgJJOr/7CK2dwA4r7Qh+1RqdKLtAogv7MrniYnOPqB7r5NZxCg==",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7ne5p+CojXWK66SIZl3MuGoyZ/X6WkWNG+ldf8TASWM=\n-----END PUBLIC KEY-----\n"
+}

@@ -10,7 +10,7 @@
     "required_evidence", "approval_attestation_required"
   ],
   "properties": {
-    "schema_version": { "const": "evidence-package@2.2" },
+    "schema_version": { "enum": ["evidence-package@2.2", "evidence-package@2.3"] },
     "spec_version": { "const": "devtask.execution@1.0" },
     "capability": { "const": "devtask.execution@1.0" },
     "bundle_id": { "type": "string", "minLength": 1 },
@@ -42,7 +42,10 @@
     "customer_evidence": { "type": "object" },
     "rfc3161_timestamp": { "type": "object" },
     "approval_attestation": { "type": "object" },
-    "observer_receipt": { "type": "object" }
+    "observer_receipt": { "type": "object" },
+    "epistemic_gate": { "type": "object" }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "if": { "properties": { "schema_version": { "const": "evidence-package@2.3" } } },
+  "then": { "required": ["epistemic_gate"] }
 }

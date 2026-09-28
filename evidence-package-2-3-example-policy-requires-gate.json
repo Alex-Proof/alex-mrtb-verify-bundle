@@ -1,0 +1,5 @@
+{
+  "policy_id": "example.requires-2-3-gate",
+  "gates_action": "example_gated_action",
+  "requires": { "epistemic_gate": "required" }
+}

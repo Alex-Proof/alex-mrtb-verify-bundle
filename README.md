@@ -344,3 +344,33 @@ Zwei weitere reale Funde aus Imans Prüfung gegen den frisch gesyncten Stand:
 Das Gate bleibt dabei eine Selbstauskunft: es authentifiziert einen Bericht darüber, welche Prüfungen
 gelaufen sind, es beweist nicht unabhängig, dass sie gelaufen sind. Das ist eine bewusste, ehrlich
 benannte Grenze (siehe "Deliberate limits" oben), keine Lücke, die dieser Fix schließt.
+
+**Zuletzt bearbeitet:** 2026-09-28
+**Von:** Claude Code (MERIDIAN)
+`evidence-package@2.3`: `epistemic_gate` ist ab dieser Version PFLICHT, nicht mehr additiv-optional
+wie bei 2.0-2.2 -- ein 2.3-Bundle ohne gültiges Attestat scheitert jetzt bereits am blossen
+`verifyBundleObject()`/`verify_bundle()`-Aufruf (`epistemic_gate_<reason>`), nicht erst beim
+expliziten `verifyEpistemicGateBinding()`-Aufruf. Zusätzlich: ein authentisches, gültig signiertes
+2.2-Bundle erfüllt eine `epistemic_gate: "required"`-Proof-Policy nie (Downgrade-Schutz).
+
+Produktionsseitig stellt der Alex-Kern jeden neuen Kundenlauf jetzt tatsächlich als
+`evidence-package@2.3` aus (vorher nur die Verifikations-Fähigkeit, keine echte Ausstellung).
+Vier neue, mit dem echten Produktionsschlüssel signierte Canary-Bundles zeigen die vier Fälle, die
+Iman (EMILIA-Protocol) angefragt hatte:
+
+| Datei | Fall | Ergebnis |
+|---|---|---|
+| `evidence-package-2-3-canary-gate-missing.json` | 2.3-Bundle ohne Gate | `epistemic_gate_epistemic_gate_not_attached` |
+| `evidence-package-2-3-canary-gate-tampered.json` | Gate nachträglich verändert | `epistemic_gate_invalid_epistemic_gate_signature` |
+| `evidence-package-2-3-canary-gate-replayed.json` | Gate eines anderen Bundles wiederverwendet | `epistemic_gate_epistemic_gate_hash_mismatch` |
+| `evidence-package-2-3-canary-downgrade-2-2.json` | echtes 2.2-Bundle (Gate additiv-optional) | für sich `verified`; `blocked_by: ["epistemic_gate"]` unter `evidence-package-2-3-example-policy-requires-gate.json` |
+
+Downgrade-Nachweis reproduzieren:
+
+```
+ALEX_VERIFY_POLICY_FILE=evidence-package-2-3-example-policy-requires-gate.json \
+  node dist/verify.js evidence-package-2-3-canary-downgrade-2-2.json
+```
+
+`spec/devtask.execution@1.0.schema.json` ebenfalls nachgezogen (`schema_version` jetzt Enum 2.2/2.3,
+`epistemic_gate` per `if/then` Pflicht bei 2.3).
