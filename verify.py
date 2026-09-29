@@ -26,6 +26,53 @@ PREFIXES = {
     "diff": "devtask_diff_evidence:", "ci": "devtask_ci_result:",
 }
 
+# Gepinnte FreeTSA Root CA (https://freetsa.org/files/cacert.pem), bytegleich mit verify.ts.
+FREETSA_ROOT_CA_PEM = """-----BEGIN CERTIFICATE-----
+MIIH/zCCBeegAwIBAgIJAMHphhYNqOmAMA0GCSqGSIb3DQEBDQUAMIGVMREwDwYD
+VQQKEwhGcmVlIFRTQTEQMA4GA1UECxMHUm9vdCBDQTEYMBYGA1UEAxMPd3d3LmZy
+ZWV0c2Eub3JnMSIwIAYJKoZIhvcNAQkBFhNidXNpbGV6YXNAZ21haWwuY29tMRIw
+EAYDVQQHEwlXdWVyemJ1cmcxDzANBgNVBAgTBkJheWVybjELMAkGA1UEBhMCREUw
+HhcNMTYwMzEzMDE1MjEzWhcNNDEwMzA3MDE1MjEzWjCBlTERMA8GA1UEChMIRnJl
+ZSBUU0ExEDAOBgNVBAsTB1Jvb3QgQ0ExGDAWBgNVBAMTD3d3dy5mcmVldHNhLm9y
+ZzEiMCAGCSqGSIb3DQEJARYTYnVzaWxlemFzQGdtYWlsLmNvbTESMBAGA1UEBxMJ
+V3VlcnpidXJnMQ8wDQYDVQQIEwZCYXllcm4xCzAJBgNVBAYTAkRFMIICIjANBgkq
+hkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtgKODjAy8REQ2WTNqUudAnjhlCrpE6ql
+mQfNppeTmVvZrH4zutn+NwTaHAGpjSGv4/WRpZ1wZ3BRZ5mPUBZyLgq0YrIfQ5Fx
+0s/MRZPzc1r3lKWrMR9sAQx4mN4z11xFEO529L0dFJjPF9MD8Gpd2feWzGyptlel
+b+PqT+++fOa2oY0+NaMM7l/xcNHPOaMz0/2olk0i22hbKeVhvokPCqhFhzsuhKsm
+q4Of/o+t6dI7sx5h0nPMm4gGSRhfq+z6BTRgCrqQG2FOLoVFgt6iIm/BnNffUr7V
+DYd3zZmIwFOj/H3DKHoGik/xK3E82YA2ZulVOFRW/zj4ApjPa5OFbpIkd0pmzxzd
+EcL479hSA9dFiyVmSxPtY5ze1P+BE9bMU1PScpRzw8MHFXxyKqW13Qv7LWw4sbk3
+SciB7GACbQiVGzgkvXG6y85HOuvWNvC5GLSiyP9GlPB0V68tbxz4JVTRdw/Xn/XT
+FNzRBM3cq8lBOAVt/PAX5+uFcv1S9wFE8YjaBfWCP1jdBil+c4e+0tdywT2oJmYB
+BF/kEt1wmGwMmHunNEuQNzh1FtJY54hbUfiWi38mASE7xMtMhfj/C4SvapiDN837
+gYaPfs8x3KZxbX7C3YAsFnJinlwAUss1fdKar8Q/YVs7H/nU4c4Ixxxz4f67fcVq
+M2ITKentbCMCAwEAAaOCAk4wggJKMAwGA1UdEwQFMAMBAf8wDgYDVR0PAQH/BAQD
+AgHGMB0GA1UdDgQWBBT6VQ2MNGZRQ0z357OnbJWveuaklzCBygYDVR0jBIHCMIG/
+gBT6VQ2MNGZRQ0z357OnbJWveuakl6GBm6SBmDCBlTERMA8GA1UEChMIRnJlZSBU
+U0ExEDAOBgNVBAsTB1Jvb3QgQ0ExGDAWBgNVBAMTD3d3dy5mcmVldHNhLm9yZzEi
+MCAGCSqGSIb3DQEJARYTYnVzaWxlemFzQGdtYWlsLmNvbTESMBAGA1UEBxMJV3Vl
+cnpidXJnMQ8wDQYDVQQIEwZCYXllcm4xCzAJBgNVBAYTAkRFggkAwemGFg2o6YAw
+MwYDVR0fBCwwKjAooCagJIYiaHR0cDovL3d3dy5mcmVldHNhLm9yZy9yb290X2Nh
+LmNybDCBzwYDVR0gBIHHMIHEMIHBBgorBgEEAYHyJAEBMIGyMDMGCCsGAQUFBwIB
+FidodHRwOi8vd3d3LmZyZWV0c2Eub3JnL2ZyZWV0c2FfY3BzLmh0bWwwMgYIKwYB
+BQUHAgEWJmh0dHA6Ly93d3cuZnJlZXRzYS5vcmcvZnJlZXRzYV9jcHMucGRmMEcG
+CCsGAQUFBwICMDsaOUZyZWVUU0EgdHJ1c3RlZCB0aW1lc3RhbXBpbmcgU29mdHdh
+cmUgYXMgYSBTZXJ2aWNlIChTYWFTKTA3BggrBgEFBQcBAQQrMCkwJwYIKwYBBQUH
+MAGGG2h0dHA6Ly93d3cuZnJlZXRzYS5vcmc6MjU2MDANBgkqhkiG9w0BAQ0FAAOC
+AgEAaK9+v5OFYu9M6ztYC+L69sw1omdyli89lZAfpWMMh9CRmJhM6KBqM/ipwoLt
+nxyxGsbCPhcQjuTvzm+ylN6VwTMmIlVyVSLKYZcdSjt/eCUN+41K7sD7GVmxZBAF
+ILnBDmTGJmLkrU0KuuIpj8lI/E6Z6NnmuP2+RAQSHsfBQi6sssnXMo4HOW5gtPO7
+gDrUpVXID++1P4XndkoKn7Svw5n0zS9fv1hxBcYIHPPQUze2u30bAQt0n0iIyRLz
+aWuhtpAtd7ffwEbASgzB7E+NGF4tpV37e8KiA2xiGSRqT5ndu28fgpOY87gD3ArZ
+DctZvvTCfHdAS5kEO3gnGGeZEVLDmfEsv8TGJa3AljVa5E40IQDsUXpQLi8G+UC4
+1DWZu8EVT4rnYaCw1VX7ShOR1PNCCvjb8S8tfdudd9zhU3gEB0rxdeTy1tVbNLXW
+99y90xcwr1ZIDUwM/xQ/noO8FRhm0LoPC73Ef+J4ZBdrvWwauF3zJe33d4ibxEcb
+8/pz5WzFkeixYM2nsHhqHsBKw7JPouKNXRnl5IAE1eFmqDyC7G/VT7OF669xM6hb
+Ut5G21JE4cNK6NNucS+fzg1JPX0+3VhsYZjj7D5uljRvQXrJ8iHgr/M6j2oLHvTA
+I2MLdq2qjZFDOCXsxBxJpbmLGBx9ow6ZerlUxzws2AWv2pk=
+-----END CERTIFICATE-----"""
+
 
 def compact(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -68,6 +115,47 @@ def openssl_verify(public_key: str, payload: bytes, signature_b64: str) -> bool:
             return result.returncode == 0
     except (OSError, ValueError):
         return False
+
+
+def verify_rfc3161_binding(bundle: dict[str, Any]) -> tuple[bool, str | None]:
+    timestamp = bundle.get("rfc3161_timestamp")
+    if not isinstance(timestamp, dict):
+        return False, "no_timestamp_present"
+    # Diese vier Felder werden erst nach dem Zeitstempel angehaengt. Signatur und Public Key
+    # gehoeren dagegen zur gehashten Nutzlast (identisch zu verifyRfc3161Binding() in verify.ts).
+    payload = {
+        key: value for key, value in bundle.items()
+        if key not in ("rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")
+    }
+    if sha256_bytes(compact(payload)) != timestamp.get("timestamped_sha256"):
+        return False, "timestamp_hash_mismatch"
+    return True, None
+
+
+def verify_rfc3161_tsa_chain(timestamp: dict[str, Any]) -> tuple[bool, str | None]:
+    digest = timestamp.get("timestamped_sha256")
+    if not isinstance(digest, str) or not HEX64.fullmatch(digest):
+        return False, "invalid_timestamped_sha256"
+    try:
+        token = base64.b64decode(str(timestamp.get("token_der_base64", "")), validate=True)
+    except (ValueError, TypeError):
+        return False, "invalid_token_base64"
+    try:
+        with tempfile.TemporaryDirectory(prefix="alex_verify_ts_") as directory:
+            token_path = os.path.join(directory, "token.der")
+            root_path = os.path.join(directory, "freetsa-root.pem")
+            with open(token_path, "wb") as handle:
+                handle.write(token)
+            with open(root_path, "w", encoding="ascii", newline="\n") as handle:
+                handle.write(FREETSA_ROOT_CA_PEM)
+            result = subprocess.run(
+                ["openssl", "ts", "-verify", "-in", token_path, "-token_in",
+                 "-digest", digest, "-CAfile", root_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+            return (True, None) if result.returncode == 0 else (False, "tsa_chain_verification_failed")
+    except OSError:
+        return False, "openssl_unavailable"
 
 
 def event(events: list[str], name: str) -> dict[str, Any] | None:
@@ -377,9 +465,9 @@ def verify_epistemic_gate_binding(bundle: dict[str, Any], trusted_key: str) -> t
 # Bauanleitung Evidence-Standard, Punkt 3 (06.09.2026): "Proof Policies" -- Mindestbeweislage vor
 # einer als "gated" markierten Aktion. Format/Begruendung: spec/policies/README.md. Identische
 # Kopie (Logik, nicht Code) in verify.ts und evidenceBundle.server.ts. Dieser Python-Verifier
-# fuehrt NIE eine Live-Netzwerkpruefung durch (kein GitHub-Diff-, RFC-3161-Chain- oder
-# Observer-Cross-Check wie in verify.ts) -- verifier_checks bleibt deshalb hier immer auf das
-# offline Nachrechenbare beschraenkt. Eine Policy, die "independent_witness" verlangt, bleibt
+# fuehrt NIE eine Live-Netzwerkpruefung durch (kein GitHub-Diff- oder Observer-Cross-Check wie in
+# verify.ts); die RFC-3161-Kette wird rein offline gegen die gepinnte FreeTSA-Root geprueft.
+# verifier_checks bleibt auf das offline Nachrechenbare beschraenkt. Eine Policy, die "independent_witness" verlangt, bleibt
 # mit diesem Verifier folgerichtig IMMER blockiert (spec/INVARIANTS.md Invariante 2: unknown ist
 # niemals gleichbedeutend mit pass) -- das ist keine Einschraenkung dieses Skripts, sondern die
 # ehrliche Aussage, dass ein unabhaengiger Zeugennachweis offline nicht bestaetigt werden kann.
@@ -436,10 +524,21 @@ def main() -> int:
         print("VERIFIED" if ok else f"REJECTED: {reason}")
         if not ok:
             return 2
+        checks = {"signature": "ok", "hash_chain": "ok"}
+        timestamp = bundle.get("rfc3161_timestamp")
+        if isinstance(timestamp, dict):
+            binding_ok, binding_reason = verify_rfc3161_binding(bundle)
+            checks["rfc3161_binding"] = "ok" if binding_ok else (binding_reason or "failed")
+            if binding_ok:
+                chain_ok, chain_reason = verify_rfc3161_tsa_chain(timestamp)
+                checks["rfc3161_chain"] = "ok" if chain_ok else (chain_reason or "failed")
+        else:
+            checks["rfc3161_binding"] = "not_applicable_no_timestamp"
+        print(json.dumps({"checks": checks}, indent=2))
         if args.policy:
             with open(args.policy, encoding="utf-8") as handle:
                 policy = json.load(handle)
-            verifier_checks = {"signature": "ok", "hash_chain": "ok", "policy_kernel_witness": "not_checked_offline"}
+            verifier_checks = {**checks, "policy_kernel_witness": "not_checked_offline"}
             evaluation = evaluate_proof_policy(policy, bundle, bundle.get("claim_ladder", ""), verifier_checks)
             if evaluation["allowed"]:
                 print(f"PROOF POLICY '{evaluation['policy_id']}' SATISFIED -- gated action '{evaluation['gates_action']}' allowed.")
