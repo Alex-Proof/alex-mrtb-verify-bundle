@@ -4,6 +4,20 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-16 (`rights-gate-check.sh` -- live Vorab-Check, bewusst KEIN
+unabhaengiger Beweis)
+**Von:** MERIDIAN
+
+Neues Skript `rights-gate-check.sh` ergaenzt: fragt den live laufenden Policy Kernel von ALEX, was
+er fuer einen geplanten Auftrag erlauben oder verweigern wuerde, BEVOR der Auftrag laeuft. Anders
+als `verify.ts`/`verify.py` ist das ausdruecklich kein unabhaengiger, netzloser Beweis -- es
+vertraut dem Server unter `alexproof.de` fuer die Dauer der Anfrage, genau wie die bestehenden
+`prove-pr-*.sh`-Skripte das bereits fuer den Observer-Dienst und FreeTSA tun. Details, Beispiel-Plan
+(`sample-rights-gate-plan.json`) und die Abgrenzung zum Rest dieses Repos: siehe
+[Live-Vorab-Check](#live-vorab-check-rights-gate-checksh) unten.
+
+---
+
 **Zuletzt bearbeitet:** 2026-09-06 (PR #38 -- echter Slack-Befehl mit Abnahmekriterien statt
 leerer Testaufgabe)
 **Von:** MERIDIAN
@@ -225,6 +239,37 @@ attested by this verifier.
 If one system controls both the work and every event in the bundle, an internally consistent bundle
 can still contain false claims. Stronger assurance requires an independent event source, runtime
 attestation, or reproducible re-execution.
+
+## Live-Vorab-Check: `rights-gate-check.sh`
+
+```bash
+./rights-gate-check.sh sample-rights-gate-plan.json
+```
+
+Fragt `https://alexproof.de/api/rights-gate-check`, was der live laufende Policy Kernel fuer einen
+geplanten Auftrag (Tool-Aufrufe, Schreib-Allowlist) erlauben oder verweigern wuerde -- bevor der
+Auftrag tatsaechlich laeuft. Die Server-Route ruft denselben Kernel-Code auf wie der echte
+Kundenpfad, erzeugt pro Anfrage ein frisches, leeres Temp-Verzeichnis als Arbeits-Root (sofort
+danach geloescht) und fuehrt selbst nie einen Effekt aus. `fs_path`-Ziele im Plan muessen deshalb
+RELATIV sein (z.B. `"src/index.ts"`), nicht absolut gegen eine dir bekannte Root.
+
+**Bewusste Abgrenzung zum Rest dieses Repos:** `verify.ts`/`verify.py` oben pruefen eine
+kryptographische Signatur -- das Ergebnis haengt an keiner Server-Antwort, nur am oeffentlichen
+Schluessel. Dieses Skript ist etwas anderes: es stellt eine Frage an das aktuell laufende System
+und gibt dessen Antwort unveraendert zurueck. Es beweist nichts ueber einen bereits erfolgten Lauf
+und ist nicht unabhaengig von ALEX' Server -- genau wie die bestehenden `prove-pr-*.sh`-Skripte
+bereits live den Observer-Dienst und FreeTSA befragen, nur hier fuer eine hypothetische Frage statt
+fuer ein bereits signiertes Paket.
+
+Plan-Format:
+
+```json
+{
+  "auftragId": "...",
+  "allowedWritePaths": ["."],
+  "plannedCalls": [{ "tool": "write_file", "params": { "path": "src/index.ts" } }]
+}
+```
 
 ## Why this exists
 

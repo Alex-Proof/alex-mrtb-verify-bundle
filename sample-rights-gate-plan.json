@@ -1,0 +1,9 @@
+{
+  "auftragId": "rights-gate-check-sample",
+  "allowedWritePaths": ["."],
+  "plannedCalls": [
+    { "tool": "write_file", "params": { "path": "src/index.ts" } },
+    { "tool": "write_file", "params": { "path": "../outside-workspace.env" } },
+    { "tool": "telegram_send", "params": {} }
+  ]
+}
