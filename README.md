@@ -243,7 +243,7 @@ attestation, or reproducible re-execution.
 ## Live-Vorab-Check: `rights-gate-check.sh`
 
 ```bash
-./rights-gate-check.sh sample-rights-gate-plan.json
+bash rights-gate-check.sh sample-rights-gate-plan.json
 ```
 
 Fragt `https://alexproof.de/api/rights-gate-check`, was der live laufende Policy Kernel fuer einen

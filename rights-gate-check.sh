@@ -16,8 +16,8 @@
 # absolut gegen eine dir bekannte Root -- die Root existiert nur fuer die Dauer dieser einen Anfrage.
 #
 # Benutzung:
-#   ./rights-gate-check.sh plan.json
-#   ./rights-gate-check.sh sample-rights-gate-plan.json   (Beispiel-Plan in diesem Repo)
+#   bash rights-gate-check.sh plan.json
+#   bash rights-gate-check.sh sample-rights-gate-plan.json   (Beispiel-Plan in diesem Repo)
 #
 # Plan-Format (JSON):
 #   { "auftragId": "...", "allowedWritePaths": ["."], "plannedCalls": [
