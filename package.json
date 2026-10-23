@@ -15,6 +15,7 @@
     "verify.py",
     "trust-anchor.json",
     "independence/",
+    "php-exposure-collector/",
     "bundle-*.json",
     "epistemic-gate-*.json",
     "evidence-package-2-3-*.json",

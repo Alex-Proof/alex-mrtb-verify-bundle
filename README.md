@@ -4,6 +4,20 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-24 (`php-exposure-collector/` -- PHP2Shell-Exposure-Collector
+veroeffentlicht, `verify.ts` um das `php-exposure-evidence@1.0`-Schema ergaenzt)
+**Von:** MERIDIAN
+
+Neuer Unterordner `php-exposure-collector/` ergaenzt: ein read-only Collector-Skript, das lokal
+prueft, ob der PHP auf diesem Host von CVE-2026-109618/CVE-2026-109619 ("PHP2Shell", CVSSv4 9.2)
+betroffen ist, und das Ergebnis vom ALEX-Vertrauensanker signieren laesst -- offline nachpruefbar
+mit dem `verify.ts`/`verify.js` dieses Repos. Dafuer musste `verify.ts` zuerst um das Schema
+`php-exposure-evidence@1.0` ergaenzt werden, das hier bisher fehlte (zuletzt synchronisiert am
+16.10., das Schema kam privat erst am 22.10. dazu). Details: siehe
+[PHP2Shell-Exposure-Collector](#php2shell-exposure-collector) unten.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-16 (`rights-gate-check.sh` -- live Vorab-Check, bewusst KEIN
 unabhaengiger Beweis)
 **Von:** MERIDIAN
@@ -270,6 +284,24 @@ Plan-Format:
   "plannedCalls": [{ "tool": "write_file", "params": { "path": "src/index.ts" } }]
 }
 ```
+
+## PHP2Shell-Exposure-Collector
+
+```bash
+cd php-exposure-collector
+node collect.mjs --dry-run
+node collect.mjs --out mein-host-php-exposure.json
+cd .. && npm install && npm run build && cd php-exposure-collector
+node ../dist/verify.js mein-host-php-exposure.json <public-key.pem>
+```
+
+Read-only Self-Check fuer CVE-2026-109618/CVE-2026-109619 ("PHP2Shell", unauthentifizierte
+PHP-RCE, CVSSv4 9.2, Patches 21./22.10.2026). Liest nur `php -v`, `/etc/os-release` und eine
+passende read-only Paketmanager-Abfrage -- keine Exploit-Probes. Einziger Netzwerkzugriff: ein
+POST der Rohdaten an den Sign-Endpoint unter `alexproof.de`, der das Verdict selbst aus den
+Rohdaten berechnet (der Collector kann sich also nie ein falsches `PATCHED` signieren lassen).
+Details, Optionen und bekannte Grenzen (u.a. `verify.py` kennt dieses Schema noch nicht):
+[`php-exposure-collector/ANLEITUNG.md`](php-exposure-collector/ANLEITUNG.md).
 
 ## Why this exists
 

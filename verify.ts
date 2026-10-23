@@ -566,6 +566,198 @@ export function verifyChallengeResponseArtifactV1(artifact: ChallengeResponseArt
   return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
 }
 
+// php-exposure-evidence@1.0 (PHP2Shell, CVE-2026-109618/CVE-2026-109619, 22.10.2026 -- kein Shared
+// Import, siehe Datei-Header oben; identischer Diff wie core/phpExposureEvidence.server.ts +
+// core/phpExposureEvidenceVerify.server.ts im privaten alex-core-Repo, bei jeder Aenderung dort
+// auch hier nachziehen).
+//
+// PHP2Shell-Fakten (geprueft 22.10.2026): CVE-2026-109618 = GHSA-w8hw-w9fx-j79w (Core,
+// Zustandskorruption via Bailout/OOM), CVE-2026-109619 = GHSA-6wmf-4rv5-p3rp (Use-after-free ueber
+// veraltetes Pro-Request-Global-State), je CVSSv4 9.2. Gepatcht in 8.5.12/8.4.27/8.3.36/8.2.35
+// (github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w,
+// github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp, php.net/ChangeLog-8.php). PHP
+// 8.1 und aelter: kein offizieller Upstream-Fix. Debian traegt die Fix-Version sichtbar im
+// Paketstring (security-tracker.debian.org/tracker/CVE-2026-109618), andere Distributionen
+// backporten laut deren FAQ (access.redhat.com) teils ohne Versionssprung -- deshalb unten: nie
+// PATCHED allein aus einer Versionsnummer, wenn ein Paketmanager im Spiel ist.
+type PhpExposurePackageManager = "dpkg" | "rpm" | "apk" | "none";
+type PhpExposureVerdict = "PATCHED" | "VULNERABLE" | "UNKNOWN" | "EOL";
+
+interface PhpExposureRawEvidence {
+  php_version_output: string;
+  php_version_output_sha256: string;
+  os_release_output: string;
+  os_release_output_sha256: string;
+  package_manager: PhpExposurePackageManager;
+  package_query_output: string;
+  package_query_output_sha256: string;
+  distro_changelog_note: string | null;
+  distro_changelog_note_sha256: string | null;
+  collected_at: string;
+  hostname: string;
+}
+
+interface PhpExposureAssessment {
+  verdict: PhpExposureVerdict;
+  rule_version: string;
+  parsed_php_version: string | null;
+  distro_sourced: boolean;
+  evidence_refs: string[];
+  reasoning: string;
+}
+
+export interface PhpExposureEvidenceArtifactV1 {
+  schema_version: "php-exposure-evidence@1.0";
+  raw_evidence: PhpExposureRawEvidence;
+  assessment: PhpExposureAssessment;
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+const PHP_EXPOSURE_RULE_VERSION = "php-exposure-rules@2026-10-22.1";
+const PHP_EXPOSURE_FIX_PATCH_VERSIONS: Record<string, number> = { "8.2": 35, "8.3": 36, "8.4": 27, "8.5": 12 };
+
+function hashPhpExposureField(value: string): string {
+  return "sha256:" + sha256(value);
+}
+
+function parsePhpVersion(output: string): { major: number; minor: number; patch: number } | null {
+  const match = /PHP (\d+)\.(\d+)\.(\d+)/.exec(output);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
+}
+
+type PhpExposureVerdictEvalResult =
+  | { ok: true; assessment: PhpExposureAssessment }
+  | { ok: false; reason: "unsupported_rule_version" };
+
+function evaluatePhpExposureVerdict(
+  raw: Pick<PhpExposureRawEvidence,
+    "php_version_output" | "php_version_output_sha256" | "package_manager" |
+    "package_query_output" | "package_query_output_sha256" | "distro_changelog_note" | "distro_changelog_note_sha256"
+  >,
+  ruleVersion: string,
+): PhpExposureVerdictEvalResult {
+  if (ruleVersion !== PHP_EXPOSURE_RULE_VERSION) return { ok: false, reason: "unsupported_rule_version" };
+
+  const parsed = parsePhpVersion(raw.php_version_output);
+  const distroSourced = raw.package_manager !== "none" && raw.package_query_output.trim() !== "";
+
+  if (!parsed) {
+    return {
+      ok: true,
+      assessment: {
+        verdict: "UNKNOWN", rule_version: ruleVersion, parsed_php_version: null, distro_sourced: distroSourced,
+        evidence_refs: [raw.php_version_output_sha256],
+        reasoning: `php_version_output (${raw.php_version_output_sha256}) enthaelt keine erkennbare "PHP x.y.z"-Versionsangabe.`,
+      },
+    };
+  }
+  const parsedVersionString = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+  const branch = `${parsed.major}.${parsed.minor}`;
+
+  if (distroSourced) {
+    const note = raw.distro_changelog_note;
+    if (!note || note.trim() === "") {
+      return {
+        ok: true,
+        assessment: {
+          verdict: "UNKNOWN", rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: true,
+          evidence_refs: [raw.php_version_output_sha256, raw.package_query_output_sha256],
+          reasoning: `PHP-Paket per ${raw.package_manager} verwaltet (package_query_output ${raw.package_query_output_sha256}). Ohne bestaetigtes Distro-Changelog-Zitat kann PATCHED/VULNERABLE nicht allein aus Version ${parsedVersionString} abgeleitet werden -- Distributionen backporten teils ohne Versionssprung.`,
+        },
+      };
+    }
+    const noteVerdict: PhpExposureVerdict | null = /PATCHED/i.test(note) ? "PATCHED" : /VULNERABLE/i.test(note) ? "VULNERABLE" : null;
+    const noteRefs = [raw.php_version_output_sha256, raw.package_query_output_sha256, raw.distro_changelog_note_sha256 ?? ""].filter(Boolean);
+    if (!noteVerdict) {
+      return {
+        ok: true,
+        assessment: {
+          verdict: "UNKNOWN", rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: true,
+          evidence_refs: noteRefs,
+          reasoning: `distro_changelog_note (${raw.distro_changelog_note_sha256}) enthaelt weder "PATCHED" noch "VULNERABLE" -- Operator-Zitat nicht eindeutig genug fuer einen Verdict.`,
+        },
+      };
+    }
+    return {
+      ok: true,
+      assessment: {
+        verdict: noteVerdict, rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: true,
+        evidence_refs: noteRefs,
+        reasoning: `Verdict ${noteVerdict} aus operator-bestaetigtem Distro-Changelog-Zitat (${raw.distro_changelog_note_sha256}) fuer Version ${parsedVersionString} (${raw.package_manager}-Paket).`,
+      },
+    };
+  }
+
+  const fixPatch = PHP_EXPOSURE_FIX_PATCH_VERSIONS[branch];
+  if (fixPatch !== undefined) {
+    const verdict: PhpExposureVerdict = parsed.patch >= fixPatch ? "PATCHED" : "VULNERABLE";
+    return {
+      ok: true,
+      assessment: {
+        verdict, rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: false,
+        evidence_refs: [raw.php_version_output_sha256],
+        reasoning: `PHP ${parsedVersionString} (kein Paketmanager-Treffer) gegen Fix-Version ${branch}.${fixPatch} verglichen (php_version_output ${raw.php_version_output_sha256}).`,
+      },
+    };
+  }
+  if (parsed.major < 8 || (parsed.major === 8 && parsed.minor <= 1)) {
+    return {
+      ok: true,
+      assessment: {
+        verdict: "EOL", rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: false,
+        evidence_refs: [raw.php_version_output_sha256],
+        reasoning: `PHP-Branch ${branch} erhaelt keinen offiziellen Upstream-Fix fuer CVE-2026-109618/CVE-2026-109619 (php_version_output ${raw.php_version_output_sha256}).`,
+      },
+    };
+  }
+  return {
+    ok: true,
+    assessment: {
+      verdict: "UNKNOWN", rule_version: ruleVersion, parsed_php_version: parsedVersionString, distro_sourced: false,
+      evidence_refs: [raw.php_version_output_sha256],
+      reasoning: `PHP-Branch ${branch} ist in der gepinnten Regeltabelle ${ruleVersion} nicht erfasst (php_version_output ${raw.php_version_output_sha256}).`,
+    },
+  };
+}
+
+/** Vier Pruefschritte (claim_decomposition-Prinzip: Struktur vor Signatur): schema_version ->
+ *  vertrauter Signer -> raw_evidence-Hash-Selbstkonsistenz -> assessment-Neuberechnung aus
+ *  raw_evidence -> erst zuletzt die Ed25519-Signatur. Schritt 3+4 sind der Mehrwert gegenueber
+ *  einem reinen Signatur-Check: bestaetigt nicht nur "unveraendert seit Signierung", sondern "die
+ *  Bewertung folgt tatsaechlich aus den eingebetteten Rohdaten". */
+export function verifyPhpExposureEvidenceArtifactV1(artifact: PhpExposureEvidenceArtifactV1, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  if (artifact.schema_version !== "php-exposure-evidence@1.0") return { ok: false, reason: "unsupported_schema_version" };
+  if (artifact.public_key !== trustedPublicKey || artifact.signer_key_id !== `ed25519:${sha256(trustedPublicKey)}`) {
+    return { ok: false, reason: "untrusted_signer" };
+  }
+
+  const raw = artifact.raw_evidence;
+  const distroNoteHashOk = raw.distro_changelog_note !== null
+    ? hashPhpExposureField(raw.distro_changelog_note) === raw.distro_changelog_note_sha256
+    : raw.distro_changelog_note_sha256 === null;
+  if (
+    hashPhpExposureField(raw.php_version_output) !== raw.php_version_output_sha256 ||
+    hashPhpExposureField(raw.os_release_output) !== raw.os_release_output_sha256 ||
+    hashPhpExposureField(raw.package_query_output) !== raw.package_query_output_sha256 ||
+    !distroNoteHashOk
+  ) {
+    return { ok: false, reason: "raw_evidence_hash_mismatch" };
+  }
+
+  const recomputed = evaluatePhpExposureVerdict(raw, artifact.assessment.rule_version);
+  if (recomputed.ok === false) return { ok: false, reason: recomputed.reason };
+  if (JSON.stringify(recomputed.assessment) !== JSON.stringify(artifact.assessment)) {
+    return { ok: false, reason: "assessment_mismatch" };
+  }
+
+  const { signer_key_id, public_key, signature, ...payload } = artifact;
+  const validSignature = verify(null, Buffer.from(canonicalEvidenceJson(payload), "utf8"), public_key, Buffer.from(signature, "base64"));
+  return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
+}
+
 interface TestIntegrityPolicyEvidenceV1 {
   schema_version: "test-integrity-policy@1.0";
   policy: "protect_existing_tests";
@@ -1955,7 +2147,7 @@ async function main() {
     return;
   }
 
-  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | ChallengeResponseArtifactV1;
+  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | ChallengeResponseArtifactV1 | PhpExposureEvidenceArtifactV1;
 
   if (input.schema_version === "agent-passport-history@1.0") {
     const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
@@ -1988,6 +2180,23 @@ async function main() {
       return;
     }
     console.log(`Challenge response ${input.challenge_id} for receipt ${input.receipt_id} verified offline. Outcome=${input.outcome}.`);
+    return;
+  }
+
+  if (input.schema_version === "php-exposure-evidence@1.0") {
+    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    if (!trustedKey) {
+      console.error("PHP exposure evidence verification failed: trusted public key required (argv[3])");
+      process.exitCode = 2;
+      return;
+    }
+    const exposureResult = verifyPhpExposureEvidenceArtifactV1(input, trustedKey);
+    if (!exposureResult.ok) {
+      console.error(`PHP exposure evidence verification failed: ${exposureResult.reason}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`PHP exposure evidence for ${input.raw_evidence.hostname} verified offline. Verdict=${input.assessment.verdict} (${input.assessment.parsed_php_version ?? "unparsed"}).`);
     return;
   }
 
