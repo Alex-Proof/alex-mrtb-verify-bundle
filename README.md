@@ -4,6 +4,21 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier + CLI: `agent-passport-card@1.0`
+offline pruefbar, byte-gleich zum TS-Verifier)
+**Von:** MERIDIAN
+
+Der eigenstaendige `verify.py` prueft jetzt auch `agent-passport-card@1.0` (zuvor nur `verify.ts`):
+`verify_agent_passport_card_v1()` rechnet `identity_line_id` = sha256(canonical({adapter_binary_hash,
+model_version, tool_manifest, enforcement_class})), die Projektionen `barcode` (`AXP-<identity[:20]
+.upper>`) und `qr` sowie die Ed25519-Signatur offline nach. Die CLI (`python verify.py <artefakt>
+<key.pem>`) dispatcht jetzt nach `schema_version` -- Hilfsartefakte laufen ueber ihren eigenen Verifier
+statt faelschlich durch den Evidence-Bundle-Pfad. Neuer TS==Python-Paritaetstest
+(`test/python-passport-card.test.mjs`) ueber eine valide Karte + alle reason-codes. `verify.ts` wurde
+dabei auf denselben Verifier + CLI-Dispatch nachgezogen (zuvor nur im internen Stand). 48 Tests gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier: volle Paritaet der devtask-
 Outcome-Ableitung inkl. Sandbox-Attestation mit vier Profilen (proxy_only) + Executor-Provenance)
 **Von:** MERIDIAN

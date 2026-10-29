@@ -698,6 +698,36 @@ def evaluate_proof_policy(policy: dict[str, Any], bundle: dict[str, Any], effect
     }
 
 
+def verify_agent_passport_card_v1(artifact: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    """Spiegel zu verifyAgentPassportCardV1() in verify.ts (kein Shared Import). identity_line_id,
+    barcode (AXP-<identity[:20].upper>), qr-Payload und Signatur werden offline nachgerechnet. canonical
+    == canonicalEvidenceJson fuer JSON-geparste Daten (kein undefined) -> canonical_evidence_bytes."""
+    if artifact.get("schema_version") != "agent-passport-card@1.0":
+        return False, "unsupported_schema_version"
+    if artifact.get("public_key") != trusted_key or artifact.get("signer_key_id") != key_id(trusted_key):
+        return False, "untrusted_signer"
+    passport = artifact.get("passport") if isinstance(artifact.get("passport"), dict) else {}
+    identity = sha256_bytes(canonical_evidence_bytes({
+        "adapter_binary_hash": passport.get("adapter_binary_hash"),
+        "model_version": passport.get("model_version"),
+        "tool_manifest": passport.get("tool_manifest"),
+        "enforcement_class": passport.get("enforcement_class"),
+    }))
+    if artifact.get("identity_line_id") != identity:
+        return False, "identity_line_id_mismatch"
+    barcode = artifact.get("barcode") if isinstance(artifact.get("barcode"), dict) else {}
+    if barcode.get("format") != "code128" or barcode.get("value") != f"AXP-{identity[:20].upper()}":
+        return False, "barcode_projection_mismatch"
+    qr = artifact.get("qr") if isinstance(artifact.get("qr"), dict) else {}
+    qr_payload = f"alex:agent-passport:v1?identity={identity}&receipt={artifact.get('receipt_content_sha256')}"
+    if qr.get("format") != "qrcode" or qr.get("payload") != qr_payload:
+        return False, "qr_projection_mismatch"
+    payload = {key: value for key, value in artifact.items() if key != "signature"}
+    if openssl_verify(trusted_key, canonical_evidence_bytes(payload), str(artifact.get("signature", ""))):
+        return True, None
+    return False, "invalid_signature"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Independent Python verifier for ALEX dev-task Evidence Packages")
     parser.add_argument("bundle")
@@ -710,6 +740,15 @@ def main() -> int:
             bundle = json.load(handle)
         with open(args.trusted_key, encoding="utf-8") as handle:
             trusted = handle.read()
+        # CLI-Dispatch nach schema_version (Spiegel zu main() in verify.ts): Hilfsartefakte laufen
+        # ueber ihren eigenen Verifier, Evidence-Bundles fallen in den verify()-Pfad unten.
+        if bundle.get("schema_version") == "agent-passport-card@1.0":
+            ok, reason = verify_agent_passport_card_v1(bundle, trusted)
+            if ok:
+                print(f"Agent passport card {bundle.get('identity_line_id')} for receipt {bundle.get('receipt_id')} verified offline.")
+                return 0
+            print(f"Agent passport card verification failed: {reason}", file=sys.stderr)
+            return 2
         approval = None
         if args.approval_key:
             with open(args.approval_key, encoding="utf-8") as handle:

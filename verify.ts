@@ -589,6 +589,45 @@ export function verifyAgentPassportHistoryV1(bundle: AgentPassportHistoryExportV
   return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
 }
 
+// Agent Passport Card (vNext): kompakte, signierte Projektion einer Identity-Linie auf eine Akte.
+// identity_line_id = sha256(canonical({adapter_binary_hash, model_version, tool_manifest,
+// enforcement_class})); barcode/qr sind reine Projektionen derselben Identity. Spiegel zu
+// core/agentPassportCard.server.ts (kein Shared Import), bytegleich zum Python-Verifier.
+export interface AgentPassportCardArtifactV1 {
+  schema_version: "agent-passport-card@1.0";
+  passport: { model_version: string; tool_manifest: string[]; enforcement_class: string; adapter_binary_hash?: string | null; [key: string]: unknown };
+  identity_line_id: string;
+  receipt_id: string;
+  receipt_content_sha256: string;
+  outcome: "verified" | "failed" | "inconclusive";
+  claim_ladder: ClaimLadder;
+  policy_profile_hash: string;
+  barcode: { format: "code128"; value: string };
+  qr: { format: "qrcode"; payload: string };
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+export function verifyAgentPassportCardV1(artifact: AgentPassportCardArtifactV1, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  if (artifact.schema_version !== "agent-passport-card@1.0") return { ok: false, reason: "unsupported_schema_version" };
+  if (artifact.public_key !== trustedPublicKey || artifact.signer_key_id !== evidenceSignerKeyId(trustedPublicKey)) return { ok: false, reason: "untrusted_signer" };
+  const identity = createHash("sha256").update(canonical({
+    adapter_binary_hash: artifact.passport.adapter_binary_hash ?? null,
+    model_version: artifact.passport.model_version,
+    tool_manifest: artifact.passport.tool_manifest,
+    enforcement_class: artifact.passport.enforcement_class,
+  })).digest("hex");
+  if (artifact.identity_line_id !== identity) return { ok: false, reason: "identity_line_id_mismatch" };
+  if (artifact.barcode.format !== "code128" || artifact.barcode.value !== `AXP-${identity.slice(0, 20).toUpperCase()}`) return { ok: false, reason: "barcode_projection_mismatch" };
+  const qrPayload = `alex:agent-passport:v1?identity=${identity}&receipt=${artifact.receipt_content_sha256}`;
+  if (artifact.qr.format !== "qrcode" || artifact.qr.payload !== qrPayload) return { ok: false, reason: "qr_projection_mismatch" };
+  const { signature, ...payload } = artifact;
+  return verify(null, Buffer.from(canonical(payload), "utf8"), trustedPublicKey, Buffer.from(signature, "base64"))
+    ? { ok: true }
+    : { ok: false, reason: "invalid_signature" };
+}
+
 // vNext 4.9 "Challenge Protocol" (kein Shared Import, siehe Datei-Header oben -- identischer Diff
 // wie core/challengeProtocolVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
 // Gleicher Drift-Test wie oben bei Agent Passport:
@@ -2252,7 +2291,24 @@ async function main() {
     return;
   }
 
-  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | ChallengeResponseArtifactV1 | PhpExposureEvidenceArtifactV1;
+  const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | AgentPassportCardArtifactV1 | ChallengeResponseArtifactV1 | PhpExposureEvidenceArtifactV1;
+
+  if (input.schema_version === "agent-passport-card@1.0") {
+    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    if (!trustedKey) {
+      console.error("Agent passport card verification failed: trusted public key required (argv[3])");
+      process.exitCode = 2;
+      return;
+    }
+    const cardResult = verifyAgentPassportCardV1(input, trustedKey);
+    if (!cardResult.ok) {
+      console.error(`Agent passport card verification failed: ${cardResult.reason}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`Agent passport card ${input.identity_line_id} for receipt ${input.receipt_id} verified offline.`);
+    return;
+  }
 
   if (input.schema_version === "agent-passport-history@1.0") {
     const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
