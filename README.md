@@ -4,6 +4,27 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier: volle Paritaet der devtask-
+Outcome-Ableitung inkl. Sandbox-Attestation mit vier Profilen (proxy_only) + Executor-Provenance)
+**Von:** MERIDIAN
+
+Der eigenstaendige `verify.py` leitet das devtask-Outcome (`derive()`) jetzt byte-gleich zu
+`deriveDevTaskV2Outcome()` in `verify.ts` ab -- zuvor fehlte die gesamte Sandbox-Attestations-
+Ableitung auf der Python-Seite. Neu in Python nachgezogen und als TS==Python-Paritaetstest
+(`test/python-devtask-derive.test.mjs`, 24 Zweige, Verdikt byte-gleich) belegt:
+- Sandbox-Attestation: vier `network_policy`-Profile inkl. `netns_egress_proxy_only_v1`, die
+  `policy_sha256`-Nachrechnung (sortiert-kompakte Policy-Serialisierung, byte-gleich zu
+  `JSON.stringify(policy, Object.keys(policy).sort())`), `network_capture`-Konsistenz je Profil und
+  `sandbox_reference == context == Attestation-Hash`.
+- Executor-Provenance (`executor`/`harness_id`/`adapter_version`/`adapter_version_sha256`).
+- Basis-Gate: `scope_violation`, unabhaengige `negative_claim` (result=false), ungeloeste
+  `contradiction`; sowie `diff_full === null` -> `inconclusive` (nicht `failed`).
+`verify.ts` wurde dabei auf das vierte Profil (`netns_egress_proxy_only_v1`) nachgezogen (zuvor nur
+im internen Stand vorhanden). Damit ist die bisher als "ausgelassen" vermerkte proxy_only-/Sandbox-
+Luecke geschlossen -- TS und Python decken denselben Ableitungsumfang byte-gleich ab.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (Fundament-Paritaetstest: Python-Kanonisierung byte-gleich zur
 TS-Kanonisierung gegen das Goldfile)
 **Von:** MERIDIAN

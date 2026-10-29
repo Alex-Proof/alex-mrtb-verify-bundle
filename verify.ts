@@ -1032,7 +1032,7 @@ interface SandboxAttestationV2 {
   schema_version: "sandbox-attestation@2.0"; sandbox_id: string; agent_id: string;
   started_at: string; completed_at: string; snapshot_sha256: string; policy_sha256: string;
   os_isolation_available: boolean; git_metadata_absent: boolean; controller_checkout_separated: boolean;
-  network_policy: "bubblewrap_unshare_net_fail_closed" | "netns_egress_logged_v1" | "netns_egress_allowlisted_v1"; environment_policy: "bubblewrap_clearenv";
+  network_policy: "bubblewrap_unshare_net_fail_closed" | "netns_egress_logged_v1" | "netns_egress_allowlisted_v1" | "netns_egress_proxy_only_v1"; environment_policy: "bubblewrap_clearenv";
   process_policy: "systemd_scope_limits_and_kill"; handoff_manifest_sha256: string; rejected_manifest_sha256: string;
   network_capture: NetworkCaptureEvidenceV1 | null;
   file_observation?: {
@@ -1068,6 +1068,12 @@ const SANDBOX_ATTESTATION_POLICY_NETWORK_CAPTURE = {
 const SANDBOX_ATTESTATION_POLICY_NETWORK_ENFORCED = {
   ...SANDBOX_ATTESTATION_POLICY_NO_NETWORK,
   network: "netns_egress_allowlisted_v1" as const,
+};
+// Run 01 (24.10.2026): viertes Profil -- proxy-only (leere DNS-Allowlist). Eigene Konstante fuer
+// die policy_sha256-Nachrechnung, identisch zu core/mrtb/evidenceBundle.server.ts (kein Shared Import).
+const SANDBOX_ATTESTATION_POLICY_NETWORK_PROXY_ONLY = {
+  ...SANDBOX_ATTESTATION_POLICY_NO_NETWORK,
+  network: "netns_egress_proxy_only_v1" as const,
 };
 
 const PROVENANCE_CAPABILITY = "memory.provenance.attached@1.0";
@@ -1620,7 +1626,7 @@ function deriveApprovalClaimLadder(outcome: "verified" | "failed" | "inconclusiv
   return approvalReference.startsWith("webauthn_passkey:") ? "L2" : "L1";
 }
 
-function requiredDevTaskEvidenceV2(events: string[], controller?: DevTaskControllerEvidenceV2): string[] {
+export function requiredDevTaskEvidenceV2(events: string[], controller?: DevTaskControllerEvidenceV2): string[] {
   const contract = events.map((e) => parseDevTaskEvent<DevTaskContractBoundTraceEvent>(e, DEVTASK_CONTRACT_BOUND_PREFIX)).find(Boolean) ?? null;
   const outcome = events.map((e) => parseDevTaskEvent<DevTaskOutcomeTraceEvent>(e, DEVTASK_OUTCOME_PREFIX)).find(Boolean) ?? null;
   const required = ["contract", "attempt", "execution_context", "validation", "outcome", "base_commit", "diff_full"];
@@ -1631,7 +1637,7 @@ function requiredDevTaskEvidenceV2(events: string[], controller?: DevTaskControl
   return required;
 }
 
-function deriveDevTaskV2Outcome(events: string[], controller: DevTaskControllerEvidenceV2): "verified" | "failed" | "inconclusive" {
+export function deriveDevTaskV2Outcome(events: string[], controller: DevTaskControllerEvidenceV2): "verified" | "failed" | "inconclusive" {
   const contract = events.map((e) => parseDevTaskEvent<DevTaskContractBoundTraceEvent>(e, DEVTASK_CONTRACT_BOUND_PREFIX)).find(Boolean) ?? null;
   const expectedTestPolicy = buildTestIntegrityPolicyEvidence(contract?.protect_existing_tests === true, controller.repository_state);
   if (contract?.protect_existing_tests === true || controller.test_integrity_policy) {
@@ -1649,7 +1655,7 @@ function deriveDevTaskV2Outcome(events: string[], controller: DevTaskControllerE
   if (controller.task_id !== contract?.task_id || controller.attempt_number !== contract?.attempt_number) return "failed";
   if (controller.execution_reference !== context?.execution_reference) return "failed";
   const hasExecutorProvenance = Boolean(context && (context.executor || context.harness_id || context.adapter_version || context.adapter_version_sha256));
-  if (hasExecutorProvenance && (!context || !["deepseek", "hermes", "opencode", "aider", "cline"].includes(context.executor) ||
+  if (hasExecutorProvenance && (!context || !["deepseek", "hermes", "opencode", "aider", "cline", "buzz"].includes(context.executor) ||
       !/^[a-z0-9][a-z0-9._-]*$/.test(context.harness_id) ||
       !/^[a-z0-9][a-z0-9._@/-]*$/.test(context.adapter_version) ||
       context.adapter_version_sha256 !== sha256(context.adapter_version))) return "failed";
@@ -1686,13 +1692,20 @@ function deriveDevTaskV2Outcome(events: string[], controller: DevTaskControllerE
   // identische Pruefung wie in server/services/mrtb/evidenceBundle.server.ts (kein Shared Import,
   // siehe Datei-Header oben). 05.09.2026: drittes Profil ergaenzt (siehe Fund-Kommentar bei
   // SANDBOX_ATTESTATION_POLICY_NETWORK_ENFORCED oben).
+  // Run 01: proxy_only verhaelt sich fuer die Nachrechnung wie das Allowlist-Profil (network_capture
+  // befuellt), nur mit eigener Policy-Konstante.
+  const enforcedLikeProfile = attestation?.network_policy === "netns_egress_logged_v1"
+    || attestation?.network_policy === "netns_egress_allowlisted_v1"
+    || attestation?.network_policy === "netns_egress_proxy_only_v1";
   const expectedPolicy = attestation?.network_policy === "netns_egress_logged_v1"
     ? SANDBOX_ATTESTATION_POLICY_NETWORK_CAPTURE
     : attestation?.network_policy === "netns_egress_allowlisted_v1"
     ? SANDBOX_ATTESTATION_POLICY_NETWORK_ENFORCED
+    : attestation?.network_policy === "netns_egress_proxy_only_v1"
+    ? SANDBOX_ATTESTATION_POLICY_NETWORK_PROXY_ONLY
     : SANDBOX_ATTESTATION_POLICY_NO_NETWORK;
   const networkCaptureConsistent = attestation
-    ? (attestation.network_policy === "netns_egress_logged_v1" || attestation.network_policy === "netns_egress_allowlisted_v1"
+    ? (enforcedLikeProfile
       ? Boolean(attestation.network_capture &&
           attestation.network_capture.schema_version === "egress-capture@1.0" &&
           /^[a-f0-9]{64}$/.test(attestation.network_capture.dns_queries_sha256) &&
@@ -1701,7 +1714,7 @@ function deriveDevTaskV2Outcome(events: string[], controller: DevTaskControllerE
     : false;
   const sandboxValid = Boolean(attestation && attestation.schema_version === "sandbox-attestation@2.0" &&
     attestation.os_isolation_available && attestation.git_metadata_absent && attestation.controller_checkout_separated &&
-    (attestation.network_policy === "bubblewrap_unshare_net_fail_closed" || attestation.network_policy === "netns_egress_logged_v1" || attestation.network_policy === "netns_egress_allowlisted_v1") &&
+    (attestation.network_policy === "bubblewrap_unshare_net_fail_closed" || attestation.network_policy === "netns_egress_logged_v1" || attestation.network_policy === "netns_egress_allowlisted_v1" || attestation.network_policy === "netns_egress_proxy_only_v1") &&
     networkCaptureConsistent &&
     attestation.environment_policy === "bubblewrap_clearenv" &&
     attestation.process_policy === "systemd_scope_limits_and_kill" &&

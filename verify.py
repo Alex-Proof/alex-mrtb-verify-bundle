@@ -203,6 +203,43 @@ def valid_repository(repository: Any, base_commit: Any) -> bool:
     return True
 
 
+_MISSING = object()  # modelliert JS `undefined` (vs. None = JS `null`) fuer byte-genaue !==-Paritaet
+
+# Run 01 / "Code-Pruefstand": vier Sandbox-Policy-Profile fuer die policy_sha256-Nachrechnung. Flache
+# Objekte; policy_sha256 = sha256 der sortiert-kompakt serialisierten Policy (bytegleich zu
+# JSON.stringify(policy, Object.keys(policy).sort()) in verify.ts / core/mrtb/evidenceBundle.server.ts).
+SANDBOX_ATTESTATION_POLICY_NO_NETWORK = {
+    "schema_version": "sandbox-attestation@2.0", "filesystem": "snapshot_without_git_or_symlinks",
+    "network": "bubblewrap_unshare_net_fail_closed", "environment": "bubblewrap_clearenv",
+    "process": "systemd_scope_limits_and_kill", "handoff": "regular_files_only_filtered",
+}
+SANDBOX_ATTESTATION_POLICY_NETWORK_CAPTURE = {**SANDBOX_ATTESTATION_POLICY_NO_NETWORK, "network": "netns_egress_logged_v1"}
+SANDBOX_ATTESTATION_POLICY_NETWORK_ENFORCED = {**SANDBOX_ATTESTATION_POLICY_NO_NETWORK, "network": "netns_egress_allowlisted_v1"}
+SANDBOX_ATTESTATION_POLICY_NETWORK_PROXY_ONLY = {**SANDBOX_ATTESTATION_POLICY_NO_NETWORK, "network": "netns_egress_proxy_only_v1"}
+SANDBOX_NETWORK_POLICIES = (
+    "bubblewrap_unshare_net_fail_closed", "netns_egress_logged_v1",
+    "netns_egress_allowlisted_v1", "netns_egress_proxy_only_v1",
+)
+EXECUTOR_ALLOWLIST = ("deepseek", "hermes", "opencode", "aider", "cline", "buzz")
+
+
+def risk_rank(risk_class: Any) -> int:
+    match = re.fullmatch(r"R([0-4])", risk_class) if isinstance(risk_class, str) else None
+    return int(match.group(1)) if match else 4
+
+
+def _policy_sha256(policy: dict[str, Any]) -> str:
+    return sha256_bytes(json.dumps(policy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def _event_payload(raw: str, prefix: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(raw[len(prefix):])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def derive(bundle: dict[str, Any]) -> str:
     events, controller = bundle.get("trace_events"), bundle.get("controller_evidence")
     if not isinstance(events, list) or not all(isinstance(item, str) for item in events) or not isinstance(controller, dict):
@@ -222,15 +259,47 @@ def derive(bundle: dict[str, Any]) -> str:
     validation = values["validation"]
     if completed and validation and validation.get("validation_status") not in ("passed", "passed_override"):
         return "failed"
+    # Basis-Gate (deriveOutcomeFromTrace, capability devtask): scope_violation, unabhaengige
+    # negative_claim (result=False, strength != "policy_derived") und ungeloeste contradiction
+    # blockieren "verified" -> "failed". Byte-genau zu deriveOutcomeFromTrace() in verify.ts.
+    tid, anum = contract.get("task_id"), contract.get("attempt_number")
+    for raw in events:
+        if raw.startswith("devtask_scope_violation:"):
+            v = _event_payload(raw, "devtask_scope_violation:")
+            if v is not None and v.get("task_id") == tid and v.get("attempt_number") == anum:
+                return "failed"
+        elif raw.startswith("devtask_negative_claim:"):
+            v = _event_payload(raw, "devtask_negative_claim:")
+            if (v is not None and v.get("task_id") == tid and v.get("attempt_number") == anum
+                    and v.get("strength") != "policy_derived" and v.get("result") is False):
+                return "failed"
+        elif raw.startswith("devtask_contradiction:"):
+            v = _event_payload(raw, "devtask_contradiction:")
+            if v is not None and v.get("resolved") is False:
+                return "failed"
     context, diff, approval = values["context"], values["diff"], values["approval"]
     if not context or controller.get("execution_reference") != context.get("execution_reference"):
+        return "failed"
+    # Executor-Provenance: wenn behauptet (irgendeines der Felder gesetzt), muss sie vollstaendig
+    # gueltig sein -- bekannter Executor, harness_id/adapter_version im erlaubten Muster,
+    # adapter_version_sha256 == sha256(adapter_version). Spiegel zu deriveDevTaskV2Outcome() in
+    # verify.ts; fehlende Einzelfelder werden sauber als ungueltig gewertet (kein Crash).
+    executor, harness_id = context.get("executor"), context.get("harness_id")
+    adapter_version, adapter_version_sha256 = context.get("adapter_version"), context.get("adapter_version_sha256")
+    if (executor or harness_id or adapter_version or adapter_version_sha256) and (
+            executor not in EXECUTOR_ALLOWLIST
+            or not isinstance(harness_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", harness_id)
+            or not isinstance(adapter_version, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._@/-]*", adapter_version)
+            or adapter_version_sha256 != sha256_text(adapter_version)):
         return "failed"
     if not validation or controller.get("validation_reference") != validation.get("validation_reference"):
         return "failed"
     if not diff or controller.get("diff_stat_sha256") != diff.get("diff_stat_sha256") or controller.get("diff_full_sha256") != diff.get("diff_full_sha256"):
         return "failed"
+    # diff_full===null -> ueberspringen (faellt ueber basics auf "inconclusive"), NICHT "failed":
+    # byte-genau zu verify.ts (controller.diff_full !== null && diff_full_sha256 !== null && mismatch).
     full_diff, full_hash = controller.get("diff_full"), controller.get("diff_full_sha256")
-    if not isinstance(full_diff, str) or not isinstance(full_hash, str) or sha256_text(full_diff) != full_hash:
+    if full_diff is not None and full_hash is not None and (not isinstance(full_diff, str) or sha256_text(full_diff) != full_hash):
         return "failed"
     if completed and controller.get("approval_reference") != approval.get("approval_reference"):
         return "failed"
@@ -254,9 +323,55 @@ def derive(bundle: dict[str, Any]) -> str:
                     "protected": True, "status": "failed" if violating else "passed", "violating_files": violating}
         if controller.get("test_integrity_policy") != expected or violating:
             return "failed"
+    # Sandbox-Attestation (Run 01 / "Code-Pruefstand", 4 Profile inkl. proxy_only): sandbox_reference
+    # muss zu context UND zum berechneten Attestation-Hash passen; policy_sha256 haengt am behaupteten
+    # network_policy-Profil, network_capture muss dazu konsistent sein (nur bei den netns_egress_*-
+    # Profilen befuellt, sonst exakt null). Byte-genau zu deriveDevTaskV2Outcome() in verify.ts; JS
+    # undefined/null via _MISSING modelliert, damit der "Feld fehlt ganz"-Fall (undefined !== null ->
+    # failed) exakt wie in TS entscheidet.
+    attestation = controller.get("sandbox_attestation")
+    attestation_hash = ("sandbox-attestation:sha256:" + sha256_bytes(compact(attestation))) if attestation else None
+    sandbox_ref = controller.get("sandbox_reference", _MISSING)
+    if sandbox_ref != context.get("sandbox_reference", _MISSING) or sandbox_ref != attestation_hash:
+        return "failed"
+    network_policy = attestation.get("network_policy") if isinstance(attestation, dict) else None
+    enforced_like = network_policy in ("netns_egress_logged_v1", "netns_egress_allowlisted_v1", "netns_egress_proxy_only_v1")
+    expected_policy = (
+        SANDBOX_ATTESTATION_POLICY_NETWORK_CAPTURE if network_policy == "netns_egress_logged_v1"
+        else SANDBOX_ATTESTATION_POLICY_NETWORK_ENFORCED if network_policy == "netns_egress_allowlisted_v1"
+        else SANDBOX_ATTESTATION_POLICY_NETWORK_PROXY_ONLY if network_policy == "netns_egress_proxy_only_v1"
+        else SANDBOX_ATTESTATION_POLICY_NO_NETWORK)
+    capture = attestation.get("network_capture", _MISSING) if isinstance(attestation, dict) else _MISSING
+    if not attestation:
+        network_capture_consistent = False
+    elif enforced_like:
+        network_capture_consistent = bool(
+            isinstance(capture, dict)
+            and capture.get("schema_version") == "egress-capture@1.0"
+            and isinstance(capture.get("dns_queries_sha256"), str) and HEX64.fullmatch(capture["dns_queries_sha256"])
+            and isinstance(capture.get("connections_sha256"), str) and HEX64.fullmatch(capture["connections_sha256"]))
+    else:
+        network_capture_consistent = capture is None
+    sandbox_hashes = ([attestation.get(name) for name in ("snapshot_sha256", "policy_sha256", "handoff_manifest_sha256", "rejected_manifest_sha256")]
+                      if isinstance(attestation, dict) else [])
+    sandbox_valid = bool(
+        isinstance(attestation, dict)
+        and attestation.get("schema_version") == "sandbox-attestation@2.0"
+        and attestation.get("os_isolation_available") and attestation.get("git_metadata_absent")
+        and attestation.get("controller_checkout_separated")
+        and network_policy in SANDBOX_NETWORK_POLICIES
+        and network_capture_consistent
+        and attestation.get("environment_policy") == "bubblewrap_clearenv"
+        and attestation.get("process_policy") == "systemd_scope_limits_and_kill"
+        and attestation.get("agent_id") == controller.get("agent_run_id")
+        and attestation.get("policy_sha256") == _policy_sha256(expected_policy)
+        and all(isinstance(h, str) and HEX64.fullmatch(h) for h in sandbox_hashes))
+    rank = risk_rank(contract.get("risk_class"))
     required = ["contract", "attempt", "execution_context", "validation", "outcome", "base_commit", "diff_full"]
     if completed:
         required += ["human_approval", "result_reference", "ci_result"]
+    if rank >= 3:
+        required.append("sandbox_attestation")
     if repository is not None:
         required.append("repository_state")
     if contract.get("protect_existing_tests") is True:
@@ -266,6 +381,8 @@ def derive(bundle: dict[str, Any]) -> str:
     basics = [controller.get("base_commit"), controller.get("diff_full"), context, validation, outcome]
     if completed:
         basics += [controller.get("result_reference"), approval, ci]
+    if rank >= 3:
+        basics.append(sandbox_valid)
     return "verified" if all(basics) else "inconclusive"
 
 
