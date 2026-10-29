@@ -4,6 +4,23 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (drei weitere veroeffentlichte Negativ-Akten ergaenzt, keine
+Verifier-Logik geaendert)
+**Von:** MERIDIAN
+
+Drei auf alexproof.de veroeffentlichte, echte `outcome: failed`-Negativ-Akten in dieses Repo
+aufgenommen: `enforced-egress-proxy-only-canary-1.json` (proxy-only Egress-Durchsetzung, Run 01),
+`cline-acp-anthropic-canary-1.json` und `cline-acp-openai-canary-1.json` (Cline-ACP-Effect-Boundary
+fuer die Anthropic-/OpenAI-Engine). TS- und Python-Verifier lehnen alle drei byte-gleich mit
+`non_verified_outcome:failed` ab -- FEHLGESCHLAGEN by design ist hier das staerkere Ergebnis.
+Bewusst KEINE Aenderung an `verify.ts`/`verify.py`: die bestehenden Verifier rechnen alle drei
+unveraendert korrekt gegen den Trust-Anchor `ed25519:6920d245...` nach (gegengeprueft TS + Python).
+Die lokal experimentell weiter fortgeschrittene TS-Logik (proxy-only-Attestationsprofil,
+agent-passport-card) wurde NICHT uebernommen, da sie im eigenstaendigen Python-Verifier keinen
+Gegenpart hat -- die TS/Python-Paritaet bleibt gewahrt, bis beide Seiten gemeinsam nachziehen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-24 (`php-exposure-collector/` -- PHP2Shell-Exposure-Collector
 veroeffentlicht, `verify.ts` um das `php-exposure-evidence@1.0`-Schema ergaenzt)
 **Von:** MERIDIAN

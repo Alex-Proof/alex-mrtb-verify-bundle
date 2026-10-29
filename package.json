@@ -20,7 +20,10 @@
     "epistemic-gate-*.json",
     "evidence-package-2-3-*.json",
     "network-egress-deny-canary-14.json",
-    "cline-acp-canary-13.json"
+    "cline-acp-canary-13.json",
+    "enforced-egress-proxy-only-canary-1.json",
+    "cline-acp-anthropic-canary-1.json",
+    "cline-acp-openai-canary-1.json"
   ],
   "engines": {
     "node": ">=20"
