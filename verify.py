@@ -728,6 +728,255 @@ def verify_agent_passport_card_v1(artifact: dict[str, Any], trusted_key: str) ->
     return False, "invalid_signature"
 
 
+PASSPORT_HISTORY_GENESIS_HASH = "0" * 64
+
+
+def _recompute_passport_history_entry_hash(entry: dict[str, Any]) -> str:
+    body = {
+        "identity_line_id": entry.get("identityLineId"), "sequence": entry.get("sequence"),
+        "receipt_hash": entry.get("receiptHash"), "verdict_hash": entry.get("verdictHash"),
+        "outcome": entry.get("outcome"), "claim_ladder": entry.get("claimLadder"),
+        "policy_profile_hash": entry.get("policyProfileHash"), "recorded_at": entry.get("recordedAt"),
+    }
+    return sha256_bytes(str(entry.get("prevHash")).encode("utf-8") + canonical_evidence_bytes(body))
+
+
+def verify_agent_passport_history_v1(bundle: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    """Spiegel zu verifyAgentPassportHistoryV1() in verify.ts. Hash-Kette (prev_hash + kanonisierter
+    Eintrag, Sequenz 0 = Genesis, luecken-/sprungfrei) + Export-Signatur ueber die gesamte Kette."""
+    if bundle.get("schema_version") != "agent-passport-history@1.0":
+        return False, "unsupported_schema_version"
+    if bundle.get("public_key") != trusted_key:
+        return False, "untrusted_signer"
+    expected_prev = PASSPORT_HISTORY_GENESIS_HASH
+    entries = bundle.get("entries") if isinstance(bundle.get("entries"), list) else []
+    for i, entry in enumerate(entries):
+        seq = entry.get("sequence")
+        if entry.get("identityLineId") != bundle.get("identity_line_id"):
+            return False, f"identity_line_id_mismatch:{seq}"
+        if seq != i:
+            return False, f"sequence_gap:{seq}"
+        if entry.get("prevHash") != expected_prev:
+            return False, f"chain_broken:{seq}"
+        if _recompute_passport_history_entry_hash(entry) != entry.get("entryHash"):
+            return False, f"entry_hash_mismatch:{seq}"
+        expected_prev = entry.get("entryHash")
+    signed = canonical_evidence_bytes({"identity_line_id": bundle.get("identity_line_id"), "entries": entries})
+    if openssl_verify(trusted_key, signed, str(bundle.get("signature", ""))):
+        return True, None
+    return False, "invalid_signature"
+
+
+def verify_challenge_response_artifact_v1(artifact: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    """Spiegel zu verifyChallengeResponseArtifactV1() in verify.ts. Superseding-Receipt (nur bei
+    outcome CONTRADICTED) muss per supersedes auf genau dieses Receipt zeigen; dann Ed25519-Signatur
+    ueber die gesamte Nutzlast (ohne signer_key_id/public_key/signature)."""
+    if artifact.get("schema_version") != "challenge-response@1.0":
+        return False, "unsupported_schema_version"
+    if artifact.get("public_key") != trusted_key or artifact.get("signer_key_id") != key_id(trusted_key):
+        return False, "untrusted_signer"
+    superseding = artifact.get("superseding_receipt", _MISSING)
+    has_superseding = superseding is not None  # JS `!== null`: undefined(absent)->True, null->False
+    should_have = artifact.get("outcome") == "CONTRADICTED"
+    if has_superseding != should_have:
+        return False, "superseding_receipt_outcome_mismatch"
+    if has_superseding and ((superseding.get("supersedes") if isinstance(superseding, dict) else None) != artifact.get("receipt_id")):
+        return False, "superseding_receipt_does_not_reference_original"
+    payload = {k: v for k, v in artifact.items() if k not in ("signer_key_id", "public_key", "signature")}
+    if openssl_verify(trusted_key, canonical_evidence_bytes(payload), str(artifact.get("signature", ""))):
+        return True, None
+    return False, "invalid_signature"
+
+
+PHP_EXPOSURE_RULE_VERSION = "php-exposure-rules@2026-10-22.1"
+PHP_EXPOSURE_FIX_PATCH_VERSIONS = {"8.2": 35, "8.3": 36, "8.4": 27, "8.5": 12}
+
+
+def _hash_php_field(value: str) -> str:
+    return "sha256:" + sha256_text(value)
+
+
+def _parse_php_version(output: str) -> tuple[int, int, int] | None:
+    match = re.search(r"PHP (\d+)\.(\d+)\.(\d+)", output if isinstance(output, str) else "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def _evaluate_php_exposure_verdict(raw: dict[str, Any], rule_version: str) -> tuple[dict[str, Any] | None, str | None]:
+    if rule_version != PHP_EXPOSURE_RULE_VERSION:
+        return None, "unsupported_rule_version"
+    php_sha = raw.get("php_version_output_sha256")
+    pkg_sha = raw.get("package_query_output_sha256")
+    note_sha = raw.get("distro_changelog_note_sha256")
+    parsed = _parse_php_version(raw.get("php_version_output"))
+    distro_sourced = raw.get("package_manager") != "none" and (raw.get("package_query_output") or "").strip() != ""
+    if not parsed:
+        return {
+            "verdict": "UNKNOWN", "rule_version": rule_version, "parsed_php_version": None, "distro_sourced": distro_sourced,
+            "evidence_refs": [php_sha],
+            "reasoning": f'php_version_output ({php_sha}) enthaelt keine erkennbare "PHP x.y.z"-Versionsangabe.',
+        }, None
+    parsed_version_string = f"{parsed[0]}.{parsed[1]}.{parsed[2]}"
+    branch = f"{parsed[0]}.{parsed[1]}"
+    if distro_sourced:
+        note = raw.get("distro_changelog_note")
+        if not note or note.strip() == "":
+            return {
+                "verdict": "UNKNOWN", "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": True,
+                "evidence_refs": [php_sha, pkg_sha],
+                "reasoning": f"PHP-Paket per {raw.get('package_manager')} verwaltet (package_query_output {pkg_sha}). Ohne bestaetigtes Distro-Changelog-Zitat kann PATCHED/VULNERABLE nicht allein aus Version {parsed_version_string} abgeleitet werden -- Distributionen backporten teils ohne Versionssprung.",
+            }, None
+        note_verdict = "PATCHED" if re.search("PATCHED", note, re.IGNORECASE) else "VULNERABLE" if re.search("VULNERABLE", note, re.IGNORECASE) else None
+        note_refs = [ref for ref in [php_sha, pkg_sha, (note_sha if note_sha is not None else "")] if ref]
+        if not note_verdict:
+            return {
+                "verdict": "UNKNOWN", "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": True,
+                "evidence_refs": note_refs,
+                "reasoning": f'distro_changelog_note ({note_sha}) enthaelt weder "PATCHED" noch "VULNERABLE" -- Operator-Zitat nicht eindeutig genug fuer einen Verdict.',
+            }, None
+        return {
+            "verdict": note_verdict, "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": True,
+            "evidence_refs": note_refs,
+            "reasoning": f"Verdict {note_verdict} aus operator-bestaetigtem Distro-Changelog-Zitat ({note_sha}) fuer Version {parsed_version_string} ({raw.get('package_manager')}-Paket).",
+        }, None
+    fix_patch = PHP_EXPOSURE_FIX_PATCH_VERSIONS.get(branch)
+    if fix_patch is not None:
+        verdict = "PATCHED" if parsed[2] >= fix_patch else "VULNERABLE"
+        return {
+            "verdict": verdict, "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": False,
+            "evidence_refs": [php_sha],
+            "reasoning": f"PHP {parsed_version_string} (kein Paketmanager-Treffer) gegen Fix-Version {branch}.{fix_patch} verglichen (php_version_output {php_sha}).",
+        }, None
+    if parsed[0] < 8 or (parsed[0] == 8 and parsed[1] <= 1):
+        return {
+            "verdict": "EOL", "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": False,
+            "evidence_refs": [php_sha],
+            "reasoning": f"PHP-Branch {branch} erhaelt keinen offiziellen Upstream-Fix fuer CVE-2026-109618/CVE-2026-109619 (php_version_output {php_sha}).",
+        }, None
+    return {
+        "verdict": "UNKNOWN", "rule_version": rule_version, "parsed_php_version": parsed_version_string, "distro_sourced": False,
+        "evidence_refs": [php_sha],
+        "reasoning": f"PHP-Branch {branch} ist in der gepinnten Regeltabelle {rule_version} nicht erfasst (php_version_output {php_sha}).",
+    }, None
+
+
+def verify_php_exposure_evidence_artifact_v1(artifact: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    """Spiegel zu verifyPhpExposureEvidenceArtifactV1() in verify.ts. schema -> Signer -> raw_evidence-
+    Hash-Selbstkonsistenz -> assessment-Neuberechnung aus raw_evidence -> zuletzt Ed25519-Signatur."""
+    if artifact.get("schema_version") != "php-exposure-evidence@1.0":
+        return False, "unsupported_schema_version"
+    if artifact.get("public_key") != trusted_key or artifact.get("signer_key_id") != key_id(trusted_key):
+        return False, "untrusted_signer"
+    raw = artifact.get("raw_evidence") if isinstance(artifact.get("raw_evidence"), dict) else {}
+    note = raw.get("distro_changelog_note")
+    distro_note_hash_ok = (_hash_php_field(note) == raw.get("distro_changelog_note_sha256")) if note is not None else (raw.get("distro_changelog_note_sha256") is None)
+    if (_hash_php_field(raw.get("php_version_output", "")) != raw.get("php_version_output_sha256")
+            or _hash_php_field(raw.get("os_release_output", "")) != raw.get("os_release_output_sha256")
+            or _hash_php_field(raw.get("package_query_output", "")) != raw.get("package_query_output_sha256")
+            or not distro_note_hash_ok):
+        return False, "raw_evidence_hash_mismatch"
+    assessment = artifact.get("assessment") if isinstance(artifact.get("assessment"), dict) else {}
+    recomputed, reason = _evaluate_php_exposure_verdict(raw, assessment.get("rule_version"))
+    if reason is not None:
+        return False, reason
+    if compact(recomputed) != compact(assessment):
+        return False, "assessment_mismatch"
+    payload = {k: v for k, v in artifact.items() if k not in ("signer_key_id", "public_key", "signature")}
+    if openssl_verify(trusted_key, canonical_evidence_bytes(payload), str(artifact.get("signature", ""))):
+        return True, None
+    return False, "invalid_signature"
+
+
+def _derive_approval_claim_ladder(outcome: str, approval_reference: Any) -> str:
+    if outcome != "verified":
+        return "L0"
+    if not approval_reference:
+        return "L2"
+    return "L2" if isinstance(approval_reference, str) and approval_reference.startswith("webauthn_passkey:") else "L1"
+
+
+def _sha256_canonical(value: Any) -> str:
+    return "sha256:" + sha256_bytes(canonical_evidence_bytes(value))
+
+
+def _verdict_reason_codes(bundle: dict[str, Any]) -> list[str]:
+    derived = derive(bundle)
+    reasons = [f"outcome_{derived}"]
+    if derived != "verified":
+        reasons.append("required_evidence_not_fully_satisfied")
+    if not bundle.get("observer_receipt"):
+        reasons.append("independent_observer_not_attached")
+    if not bundle.get("approval_attestation"):
+        reasons.append("human_approval_attestation_not_attached")
+    return reasons
+
+
+def build_verdict_artifact_v1(bundle: dict[str, Any], verifier_build_sha256: str) -> dict[str, Any]:
+    """Spiegel zu buildVerdictArtifactV1() in verify.ts. Baut die erwartete Verdict-Akte deterministisch
+    aus dem Quell-Bundle; verifyVerdictArtifactV1() vergleicht die vorgelegte Akte byte-gleich dagegen."""
+    if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or not bundle.get("controller_evidence"):
+        raise ValueError("unsupported_verdict_source")
+    controller = bundle["controller_evidence"]
+    policy_hash = controller.get("policy_snapshot_sha256")
+    if not policy_hash:
+        raise ValueError("missing_frozen_policy_hash")
+    normalized = f"sha256:{policy_hash}" if isinstance(policy_hash, str) and re.fullmatch(r"[0-9a-f]{64}", policy_hash) else policy_hash
+    if not (isinstance(normalized, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", normalized)):
+        raise ValueError("invalid_frozen_policy_hash")
+    if not controller.get("contract_snapshot"):
+        raise ValueError("missing_frozen_charter")
+    if not (isinstance(verifier_build_sha256, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", verifier_build_sha256)):
+        raise ValueError("invalid_verifier_build_hash")
+    if not bundle.get("signer_key_id"):
+        raise ValueError("missing_signer_key_id")
+    execution_core = {
+        "trace_events": bundle.get("trace_events"), "trace_hash_chain": bundle.get("trace_hash_chain"),
+        "controller_evidence": controller, "required_evidence": bundle.get("required_evidence"),
+    }
+    verdict = derive(bundle)
+    claim_ladder = _derive_approval_claim_ladder(verdict, controller.get("approval_reference"))
+    return {
+        "schema_version": "verdict-artifact@1.0", "created_at": bundle.get("executed_at"), "source_bundle": bundle,
+        "bindings": {
+            "charter_sha256": _sha256_canonical(controller.get("contract_snapshot")), "policy_sha256": normalized,
+            "execution_evidence_sha256": _sha256_canonical(execution_core), "evidence_package_sha256": _sha256_canonical(bundle),
+            "verifier_build_sha256": verifier_build_sha256,
+        },
+        "decision": {
+            "verdict": verdict, "claim_ladder": claim_ladder, "reason_codes": _verdict_reason_codes(bundle),
+            "evidence_pointers": ["/outcome", "/claim_ladder", "/required_evidence", "/controller_evidence", "/trace_events"],
+        },
+        "signature": {"scheme": "embedded-evidence-package-ed25519", "signer_key_id": bundle.get("signer_key_id"), "value": bundle.get("signature")},
+    }
+
+
+def verify_verdict_artifact_v1(artifact: dict[str, Any], trusted_key: str, verifier_build_sha256: str,
+                               approval_key: str | None = None) -> tuple[bool, str | None]:
+    """Spiegel zu verifyVerdictArtifactV1() in verify.ts: Quell-Bundle muss gegen trusted_key pruefbar
+    sein (non_verified_outcome:* ist erlaubt), epistemic_gate (Pflicht @2.3) bindet, und die vorgelegte
+    Akte muss byte-gleich zur neu abgeleiteten sein."""
+    if artifact.get("schema_version") != "verdict-artifact@1.0":
+        return False, "unsupported_verdict_schema"
+    source_bundle = artifact.get("source_bundle") or {}
+    try:
+        expected = build_verdict_artifact_v1(source_bundle, verifier_build_sha256)
+    except ValueError as error:
+        return False, str(error)
+    source_ok, source_reason = verify(source_bundle, trusted_key, approval_key)
+    if not source_ok and source_reason not in ("non_verified_outcome:failed", "non_verified_outcome:inconclusive"):
+        return False, f"source_bundle_{source_reason or 'verification_failed'}"
+    if source_bundle.get("schema_version") in EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS and not source_bundle.get("epistemic_gate"):
+        return False, "epistemic_gate_not_attached"
+    if source_bundle.get("epistemic_gate"):
+        gate_ok, gate_reason = verify_epistemic_gate_binding(source_bundle, trusted_key)
+        if not gate_ok:
+            return False, f"epistemic_gate_{gate_reason or 'invalid'}"
+    if canonical_evidence_bytes(artifact) == canonical_evidence_bytes(expected):
+        return True, None
+    return False, "verdict_derivation_mismatch"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Independent Python verifier for ALEX dev-task Evidence Packages")
     parser.add_argument("bundle")
@@ -742,12 +991,49 @@ def main() -> int:
             trusted = handle.read()
         # CLI-Dispatch nach schema_version (Spiegel zu main() in verify.ts): Hilfsartefakte laufen
         # ueber ihren eigenen Verifier, Evidence-Bundles fallen in den verify()-Pfad unten.
-        if bundle.get("schema_version") == "agent-passport-card@1.0":
+        schema = bundle.get("schema_version")
+        if schema == "agent-passport-card@1.0":
             ok, reason = verify_agent_passport_card_v1(bundle, trusted)
             if ok:
                 print(f"Agent passport card {bundle.get('identity_line_id')} for receipt {bundle.get('receipt_id')} verified offline.")
                 return 0
             print(f"Agent passport card verification failed: {reason}", file=sys.stderr)
+            return 2
+        if schema == "agent-passport-history@1.0":
+            ok, reason = verify_agent_passport_history_v1(bundle, trusted)
+            if ok:
+                count = len(bundle.get("entries") or [])
+                print(f"Agent passport history {bundle.get('identity_line_id')} verified offline. {count} entr{'y' if count == 1 else 'ies'}.")
+                return 0
+            print(f"Agent passport history verification failed: {reason}", file=sys.stderr)
+            return 2
+        if schema == "challenge-response@1.0":
+            ok, reason = verify_challenge_response_artifact_v1(bundle, trusted)
+            if ok:
+                print(f"Challenge response {bundle.get('challenge_id')} ({bundle.get('outcome')}) verified offline.")
+                return 0
+            print(f"Challenge response verification failed: {reason}", file=sys.stderr)
+            return 2
+        if schema == "php-exposure-evidence@1.0":
+            ok, reason = verify_php_exposure_evidence_artifact_v1(bundle, trusted)
+            if ok:
+                assessment = bundle.get("assessment") or {}
+                print(f"PHP exposure evidence verified offline. Verdict: {assessment.get('verdict')}.")
+                return 0
+            print(f"PHP exposure evidence verification failed: {reason}", file=sys.stderr)
+            return 2
+        if schema == "verdict-artifact@1.0":
+            approval_pem = None
+            if args.approval_key:
+                with open(args.approval_key, encoding="utf-8") as handle:
+                    approval_pem = handle.read()
+            with open(__file__, "rb") as handle:  # eigener Verifier-Build-Hash (wie verify.ts)
+                own_build = "sha256:" + sha256_bytes(handle.read())
+            ok, reason = verify_verdict_artifact_v1(bundle, trusted, own_build, approval_pem)
+            if ok:
+                print("Verdict artifact verified offline against this verifier build.")
+                return 0
+            print(f"Verdict artifact verification failed: {reason}", file=sys.stderr)
             return 2
         approval = None
         if args.approval_key:

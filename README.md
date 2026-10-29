@@ -4,6 +4,22 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (volle Paritaet erreicht: JEDER Artefakttyp jetzt auch im
+eigenstaendigen Python-Verifier offline pruefbar, byte-gleich zum TS-Verifier)
+**Von:** MERIDIAN
+
+Die vier verbleibenden Hilfsverifier sind nach Python portiert und per TS==Python-Paritaetstest belegt
+(`test/python-helpers.test.mjs`, `test/python-verdict.test.mjs`): `agent-passport-history@1.0`
+(signierte, luecken-/sprungfreie Hash-Kette), `challenge-response@1.0` (Superseding-Receipt-Bindung +
+Signatur), `php-exposure-evidence@1.0` (raw_evidence-Hash-Selbstkonsistenz + Neuberechnung des Verdikts
+aus den Rohdaten) und `verdict-artifact@1.0` (deterministische Neu-Ableitung der gesamten Verdict-Akte
+aus dem Quell-Bundle). Die Python-CLI dispatcht alle nach `schema_version`. Damit kennt der
+eigenstaendige `verify.py` jetzt JEDEN Artefakttyp, den `verify.ts` kennt, und liefert fuer jeden
+byte-gleich dasselbe Verdikt (gleiches Ergebnis UND gleicher reason-code) -- unabhaengig nachpruefbar
+in TypeScript ODER Python, ganz ohne Zugriff auf ALEX. 52 Tests gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier + CLI: `agent-passport-card@1.0`
 offline pruefbar, byte-gleich zum TS-Verifier)
 **Von:** MERIDIAN
