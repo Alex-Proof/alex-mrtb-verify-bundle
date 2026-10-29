@@ -4,6 +4,63 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+## Worum es geht
+
+ALEX erzeugt zu jedem Lauf ein signiertes Beweispaket. **Du musst uns nicht glauben, dass es stimmt --
+du kannst es selbst nachrechnen.** Genau das macht dieser Verifier: offline, auf deinem eigenen Rechner,
+ohne Zugriff auf ALEX oder Bewusst.Ki.
+
+Das Besondere: es gibt ihn **zweimal** -- einmal in TypeScript, einmal in Python, als zwei voneinander
+unabhaengige Implementierungen. Beide kommen fuer jedes Beweispaket **zeichengenau zum selben Urteil**.
+Du vertraust also nicht einmal einem einzelnen Pruefprogramm: zwei getrennte Programme muessen sich
+einig sein.
+
+Was der Verifier **nicht** behauptet: dass eine Aenderung fachlich *richtig* war -- das entscheidet eine
+Review gegen Auftrag und Abnahmekriterien. Er beweist: die Beweiskette ist echt, unveraendert und von
+ALEX signiert, nachrechenbar von jedem.
+
+## Prüf es selbst (ca. 1 Minute)
+
+Voraussetzung: [Node.js ≥ 20](https://nodejs.org) und/oder Python 3 (fuer Python genuegt das
+System-OpenSSL, keine zusaetzlichen Pakete).
+
+```bash
+git clone https://github.com/Alex-Proof/alex-mrtb-verify-bundle
+cd alex-mrtb-verify-bundle
+npm install && npm run build
+```
+
+**Ein echtes, signiertes Ergebnis selbst prüfen** -- in Python:
+
+```bash
+python verify.py independence/demo-pr-38.json \
+  independence/trusted-evidence.pem independence/trusted-approval.pem
+# -> VERIFIED
+```
+
+…oder in TypeScript, dasselbe Urteil (beendet mit Code 0, verified_claim_ladder: L1):
+
+```bash
+node dist/verify.js independence/demo-pr-38.json \
+  independence/trusted-evidence.pem independence/trusted-approval.pem
+```
+
+(Offline zeigt der Report `observer_inclusion: observer_unreachable` -- der live laufende, unabhaengige
+Beobachter-Dienst ist dann nicht erreichbar. Das aendert das Urteil nicht.)
+
+**Beweisen, dass beide Programme wirklich identisch urteilen** (braucht Node UND Python):
+
+```bash
+npm test
+# 52 Tests gruen -- darunter fuer JEDEN Artefakttyp ein Vergleich, der ein byte-genau
+# identisches Urteil (Ergebnis UND Begruendung) in TypeScript UND Python erzwingt.
+```
+
+Mehr Hintergrund und die drei reproduzierbaren Unabhaengigkeitstests (offline, auf einem fremden
+Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`](independence/).
+
+## Änderungsverlauf
+
 **Zuletzt bearbeitet:** 2026-10-29 (volle Paritaet erreicht: JEDER Artefakttyp jetzt auch im
 eigenstaendigen Python-Verifier offline pruefbar, byte-gleich zum TS-Verifier)
 **Von:** MERIDIAN
