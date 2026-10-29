@@ -4,6 +4,24 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (`reviewed_at` auf strenges ISO8601 vereinheitlicht,
+`claim_decomposition: null` wird uebersprungen -- zwei vorbestehende TS/Python-Divergenzen aufgeloest)
+**Von:** MERIDIAN
+
+Zwei schon vor dieser Session in der `claim_decomposition`-Pruefung von `verify.ts` steckende
+Abweichungen vom eigenstaendigen `verify.py` aufgeloest -- jeweils zugunsten der strengeren,
+sprachuebergreifend portablen Semantik des Python-Verifiers:
+(1) `reviewed_at` wird jetzt gegen strenges ISO8601 (UTC/`Z`) geprueft statt per `Date.parse`.
+`Date.parse` ist fuer Nicht-ISO-Strings implementierungsdefiniert und laesst sich im eigenstaendigen
+Python-Verifier nicht byte-treu nachbauen -- fuer sprachuebergreifend identische Verdikte zaehlt die
+strikte, portable Form.
+(2) `claim_decomposition: null` wird wie "nicht vorhanden" behandelt (uebersprungen) statt mit einem
+Zugriff auf `null.original_output` abzubrechen. Der eigenstaendige `verify.py` blieb unveraendert
+(hatte beide Regeln bereits korrekt); nur `verify.ts` zieht nach. `test/claim-decomposition.test.mjs`
+deckt beide Faelle als byte-gleichen TS==Python-Paritaetstest ab (jetzt 45 Tests gesamt, alle gruen).
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (`claim-decomposition@1.0` in BEIDE Verifier portiert --
 TS/Python-Paritaet gewahrt)
 **Von:** MERIDIAN

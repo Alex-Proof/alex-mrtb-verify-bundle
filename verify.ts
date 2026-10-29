@@ -183,8 +183,15 @@ function claimId(outputHash: string, start: number, end: number, type: ClaimType
   return `claim:sha256:${sha256(`${CLAIM_DECOMPOSER_VERSION}\0${outputHash}\0${start}\0${end}\0${type}`)}`;
 }
 
-/** Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- identische Logik zu
- *  validateClaimDecomposition() in core/claimDecomposition.server.ts und zum Python-Verifier. */
+// reviewed_at: strenges ISO8601 (UTC/Z) statt Date.parse wie core/claimDecomposition.server.ts.
+// Date.parse ist fuer Nicht-ISO-Strings implementierungsdefiniert und im eigenstaendigen Python-
+// Verifier (_verifier.py ISO8601_RE) nicht byte-treu nachbaubar -- fuer sprachuebergreifend identische
+// Verdikte zaehlt die strikte, portable Form. (Server nutzt weiter Date.parse; separate Angleichung.)
+const CLAIM_REVIEWED_AT_ISO8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+/** Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- Logik identisch zum eigenstaendigen
+ *  Python-Verifier (_verifier.py), gespiegelt von core/claimDecomposition.server.ts mit einer bewussten
+ *  Abweichung: reviewed_at, siehe CLAIM_REVIEWED_AT_ISO8601 oben. */
 export function validateClaimDecomposition(artifact: ClaimDecomposition, originalOutput: string, requireReview = false): string | null {
   if (artifact.schema_version !== "claim-decomposition@1.0") return "unsupported_schema_version";
   if (artifact.transformer_version !== CLAIM_DECOMPOSER_VERSION) return "unsupported_transformer_version";
@@ -193,7 +200,7 @@ export function validateClaimDecomposition(artifact: ClaimDecomposition, origina
   if (artifact.review?.proposal_source !== "untrusted") return "invalid_proposal_source";
   if (requireReview && artifact.review.status !== "reviewed") return "review_required";
   if (artifact.review.status === "reviewed") {
-    if (!artifact.review.reviewed_by || !artifact.review.reviewed_at || Number.isNaN(Date.parse(artifact.review.reviewed_at))) {
+    if (!artifact.review.reviewed_by || !artifact.review.reviewed_at || !CLAIM_REVIEWED_AT_ISO8601.test(artifact.review.reviewed_at)) {
       return "invalid_review_metadata";
     }
   } else if (artifact.review.status !== "unreviewed" || artifact.review.reviewed_by !== null || artifact.review.reviewed_at !== null) {
@@ -1744,7 +1751,9 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
     const specError = validateDevTaskEvidenceSpecV1(bundle);
     if (specError) return { ok: false, reason: specError };
   }
-  if (bundle.claim_decomposition !== undefined) {
+  // null wie "nicht vorhanden" behandeln (ueberspringen), nicht auf null.original_output zugreifen --
+  // Parity zum eigenstaendigen Python-Verifier (_verifier.py: `if claim_decomposition is not None`).
+  if (bundle.claim_decomposition !== undefined && bundle.claim_decomposition !== null) {
     const decompositionError = validateClaimDecomposition(bundle.claim_decomposition, bundle.claim_decomposition.original_output, true);
     if (decompositionError) return { ok: false, reason: `claim_decomposition_${decompositionError}` };
   }

@@ -114,6 +114,31 @@ test("recommendation/mixed status constraints match across verifiers", () => {
   assert.equal(pythonValidate(mixed), "unverifiable_status_mismatch");
 });
 
+// Phase 0.5 (29.10.2026): reviewed_at muss strenges ISO8601 (UTC/Z) sein. Vorher wich TS (Date.parse,
+// lax) vom Python-Verifier (strenge ISO8601_RE) ab. Date.parse ist fuer Nicht-ISO-Strings
+// implementierungsdefiniert und nicht byte-treu nach Python portierbar -- also gewinnt die strikte,
+// portable Form in BEIDEN Verifiern. Jeder Date.parse-bare, aber Nicht-ISO-Wert muss jetzt in beiden
+// invalid_review_metadata liefern; jede gueltige ISO-Form (mit/ohne Sekundenbruch) ok.
+const reviewedAtRejected = ["2026-10-29", "10/29/2026", "2026-10-29T00:00:00", "2026-10-29T00:00:00+00:00", "Oct 29 2026", "2026-10-29 00:00:00Z"];
+const reviewedAtAccepted = ["2026-10-29T00:00:00Z", "2026-10-29T00:00:00.000Z", "2026-10-29T23:59:59.123456Z"];
+
+test("reviewed_at: TS and Python agree that only strict ISO8601 (UTC/Z) is valid", () => {
+  for (const value of reviewedAtRejected) {
+    const artifact = validArtifact();
+    artifact.review.reviewed_at = value;
+    const ts = tsValidate(artifact);
+    assert.equal(ts, "invalid_review_metadata", `TS should reject reviewed_at=${JSON.stringify(value)}`);
+    assert.equal(pythonValidate(artifact), ts, `parity TS<->Python for reviewed_at=${JSON.stringify(value)}`);
+  }
+  for (const value of reviewedAtAccepted) {
+    const artifact = validArtifact();
+    artifact.review.reviewed_at = value;
+    const ts = tsValidate(artifact);
+    assert.equal(ts, "ok", `TS should accept reviewed_at=${JSON.stringify(value)}`);
+    assert.equal(pythonValidate(artifact), ts, `parity TS<->Python for reviewed_at=${JSON.stringify(value)}`);
+  }
+});
+
 // Integration auf der TS-Seite: claim_decomposition ist Teil der signierten Nutzlast und wird VOR der
 // Signaturpruefung strukturell geprueft (Struktur vor Signatur). Der Python-verify()-Wrapper hat
 // dieselbe Verdrahtung, greift aber nur fuer capability "devtask.execution@1.0" -- die byte-genaue
@@ -142,4 +167,13 @@ test("verifyBundleObject rejects a tampered claim_decomposition before checking 
   const bundle = signedBundleWithDecomposition(validArtifact());
   bundle.claim_decomposition.claims[0].source_text = "Berlin is the capital of France";
   assert.deepEqual(verifyBundleObject(bundle), { ok: false, reason: "claim_decomposition_source_text_mismatch" });
+});
+
+// Phase 0.5 (29.10.2026): claim_decomposition === null wird wie "nicht vorhanden" behandelt (skip),
+// nicht als TypeError auf null.original_output. Dies war die einzige divergente (crashende) Stelle --
+// der Python-Verifier ueberspringt null bereits (_verifier.py: `if claim_decomposition is not None`),
+// also bringt der Fix TS auf dessen Verhalten. (Der signierte Payload enthaelt hier bewusst das
+// explizite null-Feld, damit die Signatur ueber exakt diesen Payload gilt.)
+test("verifyBundleObject treats claim_decomposition:null as absent (parity to Python, no crash)", () => {
+  assert.deepEqual(verifyBundleObject(signedBundleWithDecomposition(null)), { ok: true });
 });
