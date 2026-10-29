@@ -23,7 +23,7 @@ function signedCard(passportOverrides = {}) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
   const passport = {
-    model_version: "claude-opus-4-8", tool_manifest: ["read", "write"], enforcement_class: "strict",
+    model_version: "example-model-v1", tool_manifest: ["read", "write"], enforcement_class: "strict",
     adapter_binary_hash: `sha256:${sha256("adapter")}`, ...passportOverrides,
   };
   const identity = sha256(canonical({

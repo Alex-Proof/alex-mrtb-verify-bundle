@@ -63,7 +63,7 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 **Zuletzt bearbeitet:** 2026-10-29 (volle Paritaet erreicht: JEDER Artefakttyp jetzt auch im
 eigenstaendigen Python-Verifier offline pruefbar, byte-gleich zum TS-Verifier)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Die vier verbleibenden Hilfsverifier sind nach Python portiert und per TS==Python-Paritaetstest belegt
 (`test/python-helpers.test.mjs`, `test/python-verdict.test.mjs`): `agent-passport-history@1.0`
@@ -79,7 +79,7 @@ in TypeScript ODER Python, ganz ohne Zugriff auf ALEX. 52 Tests gruen.
 
 **Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier + CLI: `agent-passport-card@1.0`
 offline pruefbar, byte-gleich zum TS-Verifier)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Der eigenstaendige `verify.py` prueft jetzt auch `agent-passport-card@1.0` (zuvor nur `verify.ts`):
 `verify_agent_passport_card_v1()` rechnet `identity_line_id` = sha256(canonical({adapter_binary_hash,
@@ -94,7 +94,7 @@ dabei auf denselben Verifier + CLI-Dispatch nachgezogen (zuvor nur im internen S
 
 **Zuletzt bearbeitet:** 2026-10-29 (eigenstaendiger Python-Verifier: volle Paritaet der devtask-
 Outcome-Ableitung inkl. Sandbox-Attestation mit vier Profilen (proxy_only) + Executor-Provenance)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Der eigenstaendige `verify.py` leitet das devtask-Outcome (`derive()`) jetzt byte-gleich zu
 `deriveDevTaskV2Outcome()` in `verify.ts` ab -- zuvor fehlte die gesamte Sandbox-Attestations-
@@ -115,7 +115,7 @@ Luecke geschlossen -- TS und Python decken denselben Ableitungsumfang byte-gleic
 
 **Zuletzt bearbeitet:** 2026-10-29 (Fundament-Paritaetstest: Python-Kanonisierung byte-gleich zur
 TS-Kanonisierung gegen das Goldfile)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Neuer Test `test/python-canonical.test.mjs`: beweist, dass der eigenstaendige Python-Verifier
 (`canonical_evidence_bytes`) dasselbe Goldfile (`spec/canonicalization-v1.gold.json`) BYTE-GLEICH
@@ -128,7 +128,7 @@ ist das Fundament fuer jede sprachuebergreifende Hash-/Signatur-Paritaet (insb. 
 
 **Zuletzt bearbeitet:** 2026-10-29 (`reviewed_at` auf strenges ISO8601 vereinheitlicht,
 `claim_decomposition: null` wird uebersprungen -- zwei vorbestehende TS/Python-Divergenzen aufgeloest)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Zwei schon vor dieser Session in der `claim_decomposition`-Pruefung von `verify.ts` steckende
 Abweichungen vom eigenstaendigen `verify.py` aufgeloest -- jeweils zugunsten der strengeren,
@@ -146,7 +146,7 @@ deckt beide Faelle als byte-gleichen TS==Python-Paritaetstest ab (jetzt 45 Tests
 
 **Zuletzt bearbeitet:** 2026-10-29 (`claim-decomposition@1.0` in BEIDE Verifier portiert --
 TS/Python-Paritaet gewahrt)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Die Claim-Zerlegungs-Pruefung (`claim-decomposition@1.0`, vNext 4.18) in `verify.ts` UND den
 eigenstaendigen `verify.py` aufgenommen -- beide re-validieren ein `claim_decomposition`-Artefakt
@@ -163,7 +163,7 @@ ebenfalls kann (Parity-Pflicht, kein TS-only).
 
 **Zuletzt bearbeitet:** 2026-10-29 (drei weitere veroeffentlichte Negativ-Akten ergaenzt, keine
 Verifier-Logik geaendert)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Drei auf alexproof.de veroeffentlichte, echte `outcome: failed`-Negativ-Akten in dieses Repo
 aufgenommen: `enforced-egress-proxy-only-canary-1.json` (proxy-only Egress-Durchsetzung, Run 01),
@@ -180,7 +180,7 @@ Gegenpart hat -- die TS/Python-Paritaet bleibt gewahrt, bis beide Seiten gemeins
 
 **Zuletzt bearbeitet:** 2026-10-24 (`php-exposure-collector/` -- PHP2Shell-Exposure-Collector
 veroeffentlicht, `verify.ts` um das `php-exposure-evidence@1.0`-Schema ergaenzt)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Neuer Unterordner `php-exposure-collector/` ergaenzt: ein read-only Collector-Skript, das lokal
 prueft, ob der PHP auf diesem Host von CVE-2026-109618/CVE-2026-109619 ("PHP2Shell", CVSSv4 9.2)
@@ -194,7 +194,7 @@ mit dem `verify.ts`/`verify.js` dieses Repos. Dafuer musste `verify.ts` zuerst u
 
 **Zuletzt bearbeitet:** 2026-10-16 (`rights-gate-check.sh` -- live Vorab-Check, bewusst KEIN
 unabhaengiger Beweis)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Neues Skript `rights-gate-check.sh` ergaenzt: fragt den live laufenden Policy Kernel von ALEX, was
 er fuer einen geplanten Auftrag erlauben oder verweigern wuerde, BEVOR der Auftrag laeuft. Anders
@@ -208,7 +208,7 @@ vertraut dem Server unter `alexproof.de` fuer die Dauer der Anfrage, genau wie d
 
 **Zuletzt bearbeitet:** 2026-09-06 (PR #38 -- echter Slack-Befehl mit Abnahmekriterien statt
 leerer Testaufgabe)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 `prove-pr-38.sh` beweist ein Bundle (`demo-pr-38.json`), das ueber einen echten `/devtask`-Befehl
 im Slack-Kanal ausgeloest wurde (Token-Bucket-Rate-Limiter, 369 Zeilen inkl. Tests, explizite
@@ -221,7 +221,7 @@ Pipeline-Rauchtest) -- #38 zeigt denselben Mechanismus mit echtem Inhalt.
 
 **Zuletzt bearbeitet:** 2026-09-06 (PR #37 -- erstes Paket mit Freigabe + Zeitstempel + Beobachter
 gemeinsam)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 `prove-pr-37.sh` beweist ein echtes, live durchgespieltes Bundle (`demo-pr-37.json`), das
 `approval_attestation`, `rfc3161_timestamp` UND `observer_receipt` gleichzeitig traegt -- die
@@ -235,7 +235,7 @@ unberuehrt.
 
 **Zuletzt bearbeitet:** 2026-09-06 (Sync -- war seit der RFC-3161-Kettenpruefung vom 05.09. hinter
 dem echten Stand zurueck)
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Dieses Repository war seit dem 05.09.2026 nicht mehr synchron mit dem tatsaechlich verwendeten
 Verifier -- `verify.ts` kannte weder die RFC-3161-Zertifikatsketten-Pruefung noch den unabhaengigen
@@ -266,7 +266,7 @@ Repo (identisch zur internen Kopie) und wird nur strukturell/durch manuellen Lau
 ---
 
 **Zuletzt bearbeitet:** 2026-09-01
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 `evidence-package@2.1` unterstuetzt: additive `customer_evidence`-Felder (Auftrag im Klartext,
 Kosten-Teilerfassung, abgelehnte Aktionen, Freigabe-Objekt, deterministische lesbare
@@ -292,7 +292,7 @@ bewusste Verschaerfung der Anforderung selbst. Details: `evidence/README.md`.
 ---
 
 **Zuletzt bearbeitet:** 2026-08-30
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 Originale Evidence Packages der Engine-PRs #19-#21 liegen unter `evidence/`. Neue Pakete binden
 Executor, Harness und Adapter-Version samt SHA-256 in den signierten Trace; historische V2-Pakete
 ohne diese additiven Felder bleiben verifizierbar.
@@ -300,7 +300,7 @@ ohne diese additiven Felder bleiben verifizierbar.
 AI work should ship with evidence that can be checked without trusting the AI that produced it.
 
 **Zuletzt bearbeitet:** 2026-08-26
-**Von:** Codex (MERIDIAN)
+**Von:** Alex-Proof
 V2 verlangt einen separat bezogenen Trust-Anchor und prüft Controller-Vollständigkeit.
 R3/R4 erfordern zusätzlich eine gültige `sandbox-attestation@2.0` mit vier Manifest-/Policy-Hashes.
 
@@ -493,7 +493,7 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 **Last updated:** 2026-08-20
 
-**By:** Codex (MERIDIAN)
+**By:** Alex-Proof
 
 Prepared the independent public release, negative example, and standalone regression tests.
 
@@ -501,7 +501,7 @@ Prepared the independent public release, negative example, and standalone regres
 
 **Last updated:** 2026-08-24
 
-**By:** Claude Code (MERIDIAN)
+**By:** Alex-Proof
 
 Added `devtask.execution@1.0` support, mirrored line-for-line from `server/services/mrtb/evidenceBundle.server.ts` (still a deliberate separate code copy, no shared import between server and standalone verifier). Own regression suite (`npm test`) still green, existing sample/tampered bundles still verify unchanged.
 
@@ -509,21 +509,21 @@ Added `devtask.execution@1.0` support, mirrored line-for-line from `server/servi
 
 **Last updated:** 2026-08-25
 
-**By:** Claude Code (MERIDIAN)
+**By:** Alex-Proof
 
 Following external review feedback on a real published `devtask.execution@1.0` bundle: added the exact hash-chain/signature-payload computation rule as prose (reproducible without reading the TS source), and optional `devtask_diff_evidence` parsing (SHA-256 of the `diff_stat` summary line -- not the full diff, informational only, does not change derived outcome). Server-side change mirrored in `server/services/mrtb/evidenceBundle.server.ts` + `server/services/alexWorkflowCore.server.ts`, typecheck clean.
 **Zuletzt bearbeitet:** 2026-08-27
-**Von:** Codex (MERIDIAN)
+**Von:** Alex-Proof
 Der unabhaengige Verifier prueft `repository-state@1.0`: Vorher-/Nachher-Baum,
 Ergebnis-Commit und SHA-256-Inhaltshashes jeder geaenderten Datei.
 
 **Zuletzt bearbeitet:** 2026-08-27
-**Von:** Codex (MERIDIAN)
+**Von:** Alex-Proof
 Optionaler L3-Pfad: separat signierte `validation-attestation@1.0` aus einem digest-gepinnten,
 netzlosen Runner plus `reviewer-attestation@1.0`, die exakte Bundle-/Validation-Bytes bindet.
 
 **Zuletzt bearbeitet:** 2026-08-29
-**Von:** Claude Code (MERIDIAN)
+**Von:** Alex-Proof
 Externer Vertrauensanker ergänzt: `https://bewusstki.de/.well-known/alex-pubkey.json` liefert das
 Ed25519-Schlüsselpaar unabhängig vom Bundle. Voraussetzung dafür live gefunden und gefixt:
 `ensureKeypair()` nutzte den RAM-only-Pfad des Server-Keystores, jeder Prozessneustart erzeugte
@@ -531,7 +531,7 @@ ein neues Schlüsselpaar -- ein extern verteilter Schlüssel wäre spätestens b
 wertlos gewesen. Jetzt disk-persistent (`server/services/mrtb/evidenceBundle.server.ts`).
 
 **Zuletzt bearbeitet:** 2026-08-29 (Nachtrag, gleicher Tag)
-**Von:** Claude Code (MERIDIAN)
+**Von:** Alex-Proof
 Optionales `rfc3161_timestamp`-Feld ergänzt (`Rfc3161Timestamp`-Interface,
 `verifyRfc3161Binding()`) -- bestätigt, dass ein von einer öffentlichen Zeitstempelstelle
 (FreeTSA) angehefteter RFC-3161-Zeitstempel wirklich zum vorliegenden Bundle-Inhalt gehört.
@@ -550,13 +550,13 @@ einer externen Härtungs-Review, noch nicht umgesetzt: unabhängige Event-Quelle
 Attestierung, siehe "Deliberate limits" oben).
 
 **Zuletzt bearbeitet:** 2026-08-30
-**Von:** Codex (MERIDIAN)
+**Von:** Alex-Proof
 Neue freigegebene V2-Pakete tragen eine zweite Ed25519-Signatur ueber den SHA-256 des exakten,
 bereits signierten Bundles. Das signierte Pflichtmerkmal verhindert stilles Weglassen;
 historische V2-Pakete bleiben unveraendert gueltig und werden nicht nachsigniert.
 
 **Zuletzt bearbeitet:** 2026-09-26
-**Von:** Claude Code (MERIDIAN)
+**Von:** Alex-Proof
 Dieses Repository war seit dem 09.09. gegenüber der internen Kopie zurückgefallen (fehlte u.a.
 `VerdictArtifactV1` und das neue `epistemic_gate`-Attestat komplett) -- nachgezogen in `verify.ts`
 und `verify.py`, keine öffentlich-exklusive Logik verloren.
@@ -583,7 +583,7 @@ die genau diese drei Manipulationsfälle angefragt hatte und dabei gegen die ver
 Repos getestet hätte.
 
 **Zuletzt bearbeitet:** 2026-09-26 (Nachtrag, gleicher Tag)
-**Von:** Claude Code (MERIDIAN)
+**Von:** Alex-Proof
 Zwei weitere reale Funde aus Imans Prüfung gegen den frisch gesyncten Stand:
 
 1. `verifyVerdictArtifactV1()` prüfte `epistemic_gate` bisher gar nicht mit -- ein an ein Verdict
@@ -601,7 +601,7 @@ gelaufen sind, es beweist nicht unabhängig, dass sie gelaufen sind. Das ist ein
 benannte Grenze (siehe "Deliberate limits" oben), keine Lücke, die dieser Fix schließt.
 
 **Zuletzt bearbeitet:** 2026-09-28
-**Von:** Claude Code (MERIDIAN)
+**Von:** Alex-Proof
 `evidence-package@2.3`: `epistemic_gate` ist ab dieser Version PFLICHT, nicht mehr additiv-optional
 wie bei 2.0-2.2 -- ein 2.3-Bundle ohne gültiges Attestat scheitert jetzt bereits am blossen
 `verifyBundleObject()`/`verify_bundle()`-Aufruf (`epistemic_gate_<reason>`), nicht erst beim

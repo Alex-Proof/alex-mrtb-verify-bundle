@@ -1,7 +1,7 @@
 # Independence Test Kit
 
 **Zuletzt bearbeitet:** 2026-09-06
-**Von:** MERIDIAN
+**Von:** Alex-Proof
 
 Dieses Verzeichnis enthaelt den eingefrorenen Werkzeugsatz und drei reale Pruefprotokolle
 desselben Evidence Package ohne Vertrauen in eine laufende ALEX-Instanz. Das veroeffentlichbare
