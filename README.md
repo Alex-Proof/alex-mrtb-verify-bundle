@@ -4,6 +4,19 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (Fundament-Paritaetstest: Python-Kanonisierung byte-gleich zur
+TS-Kanonisierung gegen das Goldfile)
+**Von:** MERIDIAN
+
+Neuer Test `test/python-canonical.test.mjs`: beweist, dass der eigenstaendige Python-Verifier
+(`canonical_evidence_bytes`) dasselbe Goldfile (`spec/canonicalization-v1.gold.json`) BYTE-GLEICH
+kanonisiert wie der TS-`canonicalEvidenceJson` -- gleiche rekursive Schluesselsortierung, kompakte
+Separatoren und UTF-8-Ausgabe. Dreifache Zusicherung: TS == Goldfile == Python (Bytes + sha256). Das
+ist das Fundament fuer jede sprachuebergreifende Hash-/Signatur-Paritaet (insb. die kommende
+`policy_sha256`-Nachrechnung der Sandbox-Attestation). Keine Verifier-Logik geaendert.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (`reviewed_at` auf strenges ISO8601 vereinheitlicht,
 `claim_decomposition: null` wird uebersprungen -- zwei vorbestehende TS/Python-Divergenzen aufgeloest)
 **Von:** MERIDIAN
