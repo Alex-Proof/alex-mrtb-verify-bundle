@@ -4,6 +4,23 @@ Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `indepe
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
 
+**Zuletzt bearbeitet:** 2026-10-29 (`claim-decomposition@1.0` in BEIDE Verifier portiert --
+TS/Python-Paritaet gewahrt)
+**Von:** MERIDIAN
+
+Die Claim-Zerlegungs-Pruefung (`claim-decomposition@1.0`, vNext 4.18) in `verify.ts` UND den
+eigenstaendigen `verify.py` aufgenommen -- beide re-validieren ein `claim_decomposition`-Artefakt
+(sofern vorhanden) VOR der Signaturpruefung: Schema-/Transformer-/Routing-Version, Hash des
+Originaltexts, Review-Status, luecken- und ueberlappungsfreie Quelltext-Abdeckung, deterministische
+`claim_id`- und Routing-Ableitung. Die neue Regression `test/claim-decomposition.test.mjs` jagt
+dasselbe Artefakt durch beide Verifier und erzwingt bei jedem reason-code byte-gleiches Verdikt
+(TS == Python). Bewusst OHNE die server-exklusive `review.accepted_claim_ids`-Pruefung -- der
+Offline-Verifier re-validiert nur die signierte Kernstruktur. `proxy_only`-Attestationsprofil und
+`agent-passport-card` bleiben weiterhin ausgelassen, bis der eigenstaendige Python-Verifier sie
+ebenfalls kann (Parity-Pflicht, kein TS-only).
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (drei weitere veroeffentlichte Negativ-Akten ergaenzt, keine
 Verifier-Logik geaendert)
 **Von:** MERIDIAN

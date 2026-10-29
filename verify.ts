@@ -120,6 +120,9 @@ export interface EvidenceBundle {
   // (nach observer_receipt), identische Definition zu receipts.server.ts im Alex-Monorepo. Nur die
   // Huelle wird hier gepruefte -- der innere gate-Wert selbst ist fuer den Verifier opak.
   epistemic_gate?: EpistemicGateAttestationV1;
+  // 01.10.2026 (vNext 4.18 Claim-Zerlegung): wenn vorhanden, Teil der signierten Nutzlast; wird in
+  // verifyBundleObject() zusaetzlich VOR der Signaturpruefung strukturell re-validiert.
+  claim_decomposition?: ClaimDecomposition;
 }
 
 export interface ObserverReceipt {
@@ -141,6 +144,82 @@ export interface EpistemicGateAttestationV1 {
   signer_key_id: string;
   public_key: string;
   signature: string;
+}
+
+// 01.10.2026 (vNext 4.18 Claim-Zerlegung): unabhaengig gehaltener Spiegel von
+// validateClaimDecomposition() in core/claimDecomposition.server.ts -- gleicher "kein Shared
+// Import"-Zwang wie der Rest dieser Datei, bytegleich zum eigenstaendigen Python-Verifier
+// (verify.py). claim_decomposition ist, wenn vorhanden, Teil der signierten Nutzlast (siehe
+// EvidenceBundle oben); diese Struktur-/Konsistenzpruefung laeuft deshalb VOR der Signaturpruefung
+// in verifyBundleObject(), identisch zur Reihenfolge in evidenceBundle.server.ts. Bewusst OHNE die
+// server-exklusive review.accepted_claim_ids-Pruefung -- der Offline-Verifier re-validiert nur die
+// signierte Kernstruktur, identisch zum Python-Spiegel.
+type ClaimType = "fact" | "logical_constraint" | "numeric" | "recommendation" | "mixed" | "unknown";
+type ClaimRoute = "retrieval" | "formal_solver" | "calculation_engine" | "human_review" | "none";
+type ClaimVerificationStatus = "pending" | "verified" | "contradicted" | "not_verifiable" | "human_review_required";
+const CLAIM_DECOMPOSER_VERSION = "claim-decomposer@1.0" as const;
+const CLAIM_ROUTING_RULE_VERSION = "claim-routing-rules@1.0" as const;
+const claimRouteByType: Record<ClaimType, ClaimRoute> = {
+  fact: "retrieval", logical_constraint: "formal_solver", numeric: "calculation_engine",
+  recommendation: "human_review", mixed: "none", unknown: "none",
+};
+
+export interface DecomposedClaim {
+  claim_id: string; source_start: number; source_end: number; source_text: string;
+  type: ClaimType; dependencies: string[]; route: ClaimRoute; status: ClaimVerificationStatus; reason: string | null;
+}
+
+export interface ClaimDecomposition {
+  schema_version: "claim-decomposition@1.0";
+  transformer_version: typeof CLAIM_DECOMPOSER_VERSION;
+  routing_rule_version: typeof CLAIM_ROUTING_RULE_VERSION;
+  original_output: string;
+  original_output_sha256: string;
+  review: { proposal_source: "untrusted"; status: "unreviewed" | "reviewed"; reviewed_by: string | null; reviewed_at: string | null };
+  claims: DecomposedClaim[];
+}
+
+function claimId(outputHash: string, start: number, end: number, type: ClaimType): string {
+  return `claim:sha256:${sha256(`${CLAIM_DECOMPOSER_VERSION}\0${outputHash}\0${start}\0${end}\0${type}`)}`;
+}
+
+/** Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- identische Logik zu
+ *  validateClaimDecomposition() in core/claimDecomposition.server.ts und zum Python-Verifier. */
+export function validateClaimDecomposition(artifact: ClaimDecomposition, originalOutput: string, requireReview = false): string | null {
+  if (artifact.schema_version !== "claim-decomposition@1.0") return "unsupported_schema_version";
+  if (artifact.transformer_version !== CLAIM_DECOMPOSER_VERSION) return "unsupported_transformer_version";
+  if (artifact.routing_rule_version !== CLAIM_ROUTING_RULE_VERSION) return "unsupported_routing_rule_version";
+  if (artifact.original_output_sha256 !== `sha256:${sha256(originalOutput)}`) return "original_output_hash_mismatch";
+  if (artifact.review?.proposal_source !== "untrusted") return "invalid_proposal_source";
+  if (requireReview && artifact.review.status !== "reviewed") return "review_required";
+  if (artifact.review.status === "reviewed") {
+    if (!artifact.review.reviewed_by || !artifact.review.reviewed_at || Number.isNaN(Date.parse(artifact.review.reviewed_at))) {
+      return "invalid_review_metadata";
+    }
+  } else if (artifact.review.status !== "unreviewed" || artifact.review.reviewed_by !== null || artifact.review.reviewed_at !== null) {
+    return "invalid_review_metadata";
+  }
+  if (!Array.isArray(artifact.claims) || artifact.claims.length === 0) return "missing_claims";
+
+  let cursor = 0;
+  for (const claim of artifact.claims) {
+    if (!Number.isInteger(claim.source_start) || !Number.isInteger(claim.source_end)
+      || claim.source_start < cursor || claim.source_end <= claim.source_start || claim.source_end > originalOutput.length) {
+      return "invalid_claim_offsets";
+    }
+    if (/\S/u.test(originalOutput.slice(cursor, claim.source_start))) return "uncovered_source_text";
+    if (claim.source_text !== originalOutput.slice(claim.source_start, claim.source_end)) return "source_text_mismatch";
+    if (!(claim.type in claimRouteByType) || claim.route !== claimRouteByType[claim.type]) return "routing_mismatch";
+    if (claim.claim_id !== claimId(artifact.original_output_sha256, claim.source_start, claim.source_end, claim.type)) return "claim_id_mismatch";
+    if (!Array.isArray(claim.dependencies) || claim.dependencies.some((dependency) => typeof dependency !== "string" || !dependency)) {
+      return "invalid_claim_dependency";
+    }
+    if (claim.type === "recommendation" && claim.status !== "human_review_required") return "recommendation_status_mismatch";
+    if ((claim.type === "mixed" || claim.type === "unknown") && claim.status !== "not_verifiable") return "unverifiable_status_mismatch";
+    cursor = claim.source_end;
+  }
+  if (/\S/u.test(originalOutput.slice(cursor))) return "uncovered_source_text";
+  return null;
 }
 
 /** Separate, explizit aufzurufende Pruefung -- verifyBundleObject() ruft diese Funktion NICHT
@@ -1664,6 +1743,10 @@ export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: st
   if (bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3") {
     const specError = validateDevTaskEvidenceSpecV1(bundle);
     if (specError) return { ok: false, reason: specError };
+  }
+  if (bundle.claim_decomposition !== undefined) {
+    const decompositionError = validateClaimDecomposition(bundle.claim_decomposition, bundle.claim_decomposition.original_output, true);
+    if (decompositionError) return { ok: false, reason: `claim_decomposition_${decompositionError}` };
   }
   if (isDevTaskV2Schema(bundle.schema_version)) {
     if (!trustedPublicKey) return { ok: false, reason: "missing_trust_anchor" };

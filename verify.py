@@ -309,6 +309,78 @@ def validate_spec_v1(bundle: dict[str, Any]) -> str | None:
 
 
 
+# 01.10.2026 (vNext 4.18 Claim-Zerlegung): identische Logik zu validateClaimDecomposition() in
+# core/claimDecomposition.server.ts / verify.ts -- unabhaengig gehaltener Spiegel. claim_decomposition
+# ist, wenn vorhanden, Teil der signierten Nutzlast, wird aber zusaetzlich VOR der Signaturpruefung
+# strukturell re-validiert. Bewusst OHNE die server-exklusive review.accepted_claim_ids-Pruefung --
+# der Offline-Verifier re-validiert nur die signierte Kernstruktur, bytegleich zum TS-Spiegel.
+CLAIM_DECOMPOSER_VERSION = "claim-decomposer@1.0"
+CLAIM_ROUTING_RULE_VERSION = "claim-routing-rules@1.0"
+CLAIM_ROUTE_BY_TYPE = {
+    "fact": "retrieval", "logical_constraint": "formal_solver", "numeric": "calculation_engine",
+    "recommendation": "human_review", "mixed": "none", "unknown": "none",
+}
+ISO8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+
+
+def _claim_id(output_hash: str, start: int, end: int, claim_type: str) -> str:
+    return "claim:sha256:" + sha256_text(f"{CLAIM_DECOMPOSER_VERSION}\0{output_hash}\0{start}\0{end}\0{claim_type}")
+
+
+def validate_claim_decomposition(artifact: dict[str, Any], original_output: str, require_review: bool = False) -> str | None:
+    """Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- identische Logik zu
+    validateClaimDecomposition() in core/claimDecomposition.server.ts / verify.ts."""
+    if artifact.get("schema_version") != "claim-decomposition@1.0":
+        return "unsupported_schema_version"
+    if artifact.get("transformer_version") != CLAIM_DECOMPOSER_VERSION:
+        return "unsupported_transformer_version"
+    if artifact.get("routing_rule_version") != CLAIM_ROUTING_RULE_VERSION:
+        return "unsupported_routing_rule_version"
+    if artifact.get("original_output_sha256") != "sha256:" + sha256_text(original_output):
+        return "original_output_hash_mismatch"
+    review = artifact.get("review") or {}
+    if review.get("proposal_source") != "untrusted":
+        return "invalid_proposal_source"
+    if require_review and review.get("status") != "reviewed":
+        return "review_required"
+    if review.get("status") == "reviewed":
+        reviewed_at = review.get("reviewed_at")
+        if not review.get("reviewed_by") or not isinstance(reviewed_at, str) or not ISO8601_RE.match(reviewed_at):
+            return "invalid_review_metadata"
+    elif review.get("status") != "unreviewed" or review.get("reviewed_by") is not None or review.get("reviewed_at") is not None:
+        return "invalid_review_metadata"
+    claims = artifact.get("claims")
+    if not isinstance(claims, list) or len(claims) == 0:
+        return "missing_claims"
+
+    cursor = 0
+    for claim in claims:
+        start, end = claim.get("source_start"), claim.get("source_end")
+        if (not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool)
+                or start < cursor or end <= start or end > len(original_output)):
+            return "invalid_claim_offsets"
+        if original_output[cursor:start].strip():
+            return "uncovered_source_text"
+        if claim.get("source_text") != original_output[start:end]:
+            return "source_text_mismatch"
+        claim_type = claim.get("type")
+        if claim_type not in CLAIM_ROUTE_BY_TYPE or claim.get("route") != CLAIM_ROUTE_BY_TYPE[claim_type]:
+            return "routing_mismatch"
+        if claim.get("claim_id") != _claim_id(artifact["original_output_sha256"], start, end, claim_type):
+            return "claim_id_mismatch"
+        dependencies = claim.get("dependencies")
+        if not isinstance(dependencies, list) or any(not isinstance(dep, str) or not dep for dep in dependencies):
+            return "invalid_claim_dependency"
+        if claim_type == "recommendation" and claim.get("status") != "human_review_required":
+            return "recommendation_status_mismatch"
+        if claim_type in ("mixed", "unknown") and claim.get("status") != "not_verifiable":
+            return "unverifiable_status_mismatch"
+        cursor = end
+    if original_output[cursor:].strip():
+        return "uncovered_source_text"
+    return None
+
+
 NEGATIVE_CLAIM_PREFIX = "devtask_negative_claim:"
 
 
@@ -390,6 +462,11 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
         spec_error = validate_spec_v1(bundle)
         if spec_error:
             return False, spec_error
+    claim_decomposition = bundle.get("claim_decomposition")
+    if claim_decomposition is not None:
+        decomposition_error = validate_claim_decomposition(claim_decomposition, claim_decomposition.get("original_output", ""), True)
+        if decomposition_error:
+            return False, f"claim_decomposition_{decomposition_error}"
     if shutil.which("openssl") is None:
         return False, "openssl_unavailable"
     embedded = bundle.get("public_key")
