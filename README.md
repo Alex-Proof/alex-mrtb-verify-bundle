@@ -64,10 +64,10 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 **Zuletzt bearbeitet:** 2026-10-31 (kompaktes Verifier-Binding-Manifest: `verifier-binding-manifest@1.0`)
 **Von:** Alex-Proof
 
-Externe Anfrage (SCITT-naher Austausch): ein Dritter sollte ein paar konkrete Fakten -- Basis-/
-Ergebnis-Commit, Diff-Hash, Testergebnis, Freigabe, Zeitstempel -- nachrechnen koennen, ohne das
-ganze Beweispaket zu lesen oder der ALEX-Oberflaeche zu vertrauen. Neues `verifier-binding-
-manifest@1.0`: sechs Anker (`base_sha`, `head_sha`, `diff_hash`, `test_result_hash`,
+Ein Dritter sollte ein paar konkrete Fakten -- Basis-/Ergebnis-Commit, Diff-Hash, Testergebnis,
+Freigabe, Zeitstempel -- nachrechnen koennen, ohne das ganze Beweispaket zu lesen oder der
+ALEX-Oberflaeche zu vertrauen. Neues `verifier-binding-manifest@1.0`: sechs Anker (`base_sha`,
+`head_sha`, `diff_hash`, `test_result_hash`,
 `approval_event_hash`, `repo_state_timestamp`), jeder davon gegen eine externe Quelle pruefbar (das
 Git-Repo selbst, GitHubs Check-Runs-API, eine RFC3161-Zeitstempelstelle). `test_result_hash` haengt
 am echten, typisierten `ci_result`-Trace-Event (GitHub-Checks-API-Antwort fuer den Ergebnis-Commit),
