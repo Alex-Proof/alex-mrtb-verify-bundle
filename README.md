@@ -61,6 +61,40 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
+**Zuletzt bearbeitet:** 2026-10-31 (kompaktes Verifier-Binding-Manifest: `verifier-binding-manifest@1.0`)
+**Von:** Alex-Proof
+
+Externe Anfrage (SCITT-naher Austausch): ein Dritter sollte ein paar konkrete Fakten -- Basis-/
+Ergebnis-Commit, Diff-Hash, Testergebnis, Freigabe, Zeitstempel -- nachrechnen koennen, ohne das
+ganze Beweispaket zu lesen oder der ALEX-Oberflaeche zu vertrauen. Neues `verifier-binding-
+manifest@1.0`: sechs Anker (`base_sha`, `head_sha`, `diff_hash`, `test_result_hash`,
+`approval_event_hash`, `repo_state_timestamp`), jeder davon gegen eine externe Quelle pruefbar (das
+Git-Repo selbst, GitHubs Check-Runs-API, eine RFC3161-Zeitstempelstelle). `test_result_hash` haengt
+am echten, typisierten `ci_result`-Trace-Event (GitHub-Checks-API-Antwort fuer den Ergebnis-Commit),
+nicht an einem Pointer-String. `repo_state_timestamp` ist der tatsaechliche RFC3161-Zeitstempel,
+nicht ein selbst behauptetes Datum -- ein reiner Zeitstempel-String waere von ALEX selbst frei
+waehlbar, ein RFC3161-Token ist gegen FreeTSA extern pruefbar. Beide Felder sind ehrlich `null`, wenn
+die Information im Quell-Bundle fehlt, nie ein erfundener Platzhalter.
+
+**Das Manifest ist nicht separat signiert** -- sein `signature`-Feld ist eine Kopie der
+Original-Bundle-Signatur, keine neue. Pruefung braucht deshalb immer BEIDE Dateien, Manifest und
+Quell-Bundle:
+
+```bash
+node dist/verify.js manifest manifest.json bundle.json trusted-evidence.pem trusted-approval.pem
+python verify.py manifest manifest.json bundle.json trusted-evidence.pem trusted-approval.pem
+```
+
+`verifyVerifierBindingManifestV1()` prueft dabei nicht nur, ob die sechs Werte zur Herleitung aus
+dem Bundle passen, sondern auch die Bundle-Signatur selbst, die Freigabe-Signatur (unabhaengig davon
+ob das Bundle eine zweite Freigabe ueberhaupt verlangt -- ein Luecke, die der blosse Bundle-Check
+offenlaesst) und die RFC3161-TSA-Kette gegen die gepinnte FreeTSA-Root, falls ein Zeitstempel
+angehaengt ist. Byte-gleiche TS==Python-Paritaet (`test/verifier-binding-manifest.test.mjs`, 4
+Testfaelle inkl. zwei gezielter Faelschungen: ein manipulierter `diff_hash` und eine manipulierte
+Freigabe-Signatur, die den sichtbaren Hash unangetastet laesst). 56 Tests gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-29 (volle Paritaet erreicht: JEDER Artefakttyp jetzt auch im
 eigenstaendigen Python-Verifier offline pruefbar, byte-gleich zum TS-Verifier)
 **Von:** Alex-Proof
@@ -414,6 +448,56 @@ it, and calls `crypto.verify()` against the embedded `public_key`.
 This means: JSON key order matters for signature verification (JavaScript's `JSON.stringify`
 preserves insertion order for string keys). A verifier in another language must reconstruct the
 exact same key order, not just the same key/value pairs.
+
+## Verifying a compact binding manifest
+
+`verifier-binding-manifest@1.0` is a separate, much smaller artifact: six anchors derived from a
+full `devtask.execution@1.0` bundle, meant for a third party who wants to check a handful of
+concrete facts without parsing the whole signed package.
+
+```bash
+node dist/verify.js manifest manifest.json bundle.json [controller-key.pem] [approval-key.pem]
+python verify.py manifest manifest.json bundle.json controller-key.pem [approval-key.pem]
+```
+
+**The manifest is not independently signed.** Its `signature` field is a copy of the *source
+bundle's* Ed25519 signature (`{scheme: "embedded-evidence-package-ed25519", signer_key_id,
+value}`), not a new signature over the manifest itself -- the design deliberately avoids a second
+signed truth. The manifest file alone proves nothing: verification always needs both
+`manifest.json` and the `bundle.json` it was derived from. A verifier checks three things, not just
+that the six fields match what re-deriving them from the bundle produces: the bundle's own Ed25519
+signature, the approval attestation's own signature (checked unconditionally whenever one is
+present, regardless of `approval_attestation_required` -- a gap in the plain bundle check this
+manifest closes), and the RFC-3161 timestamp's binding plus its CMS signature chain against the
+pinned FreeTSA root, if a timestamp is attached.
+
+What each anchor is, and how to re-derive it yourself against sources outside this tool:
+
+- **`base_sha` / `head_sha`** -- the two git commit SHAs (`controller_evidence.base_commit` /
+  `controller_evidence.repository_state.result_commit`). Check them against the actual repository
+  (`git log`, GitHub's compare view) directly.
+- **`diff_hash`** -- `controller_evidence.diff_full_sha256`, the SHA-256 of the full `git diff
+  base_sha..head_sha` text. Recomputable with `git diff base_sha..head_sha | sha256sum` against a
+  real checkout of the repository.
+- **`test_result_hash`** -- `"sha256:" + sha256(canonical_json({task_id, attempt_number,
+  result_commit, conclusion, checked_at, source: "github_checks_and_statuses", checks}))`, where
+  `checks` is the exact `{name, conclusion}` list GitHub's Checks API returned for `head_sha` at
+  the moment ALEX queried it. A third party can independently query
+  `GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs` for the same commit and compare the
+  `checks` list and `conclusion` by hand; `checked_at` itself is a point-in-time capture, not
+  something a later re-query can reproduce byte-for-byte if GitHub's check runs have since changed.
+  `null` means honestly "no CI result was present in this bundle", never "passed".
+- **`approval_event_hash`** -- canonical SHA-256 over the complete `approval_attestation` object
+  (its own Ed25519 signature included). `null` means no approval was attached.
+- **`repo_state_timestamp`** -- the bundle's actual `rfc3161_timestamp` object, verbatim, or `null`
+  if none was attached. Independently checkable with the system `openssl ts -reply -in <token>
+  -text` and against FreeTSA's public root CA (same pinned certificate this tool uses).
+- **`evidence_package_sha256`** -- canonical SHA-256 over the complete source bundle, binding the
+  compact manifest back to the one real signed artifact it was derived from.
+
+Canonical JSON here means object keys sorted lexicographically, no whitespace, `undefined`-valued
+keys dropped -- see `canonicalEvidenceJson()` in `verify.ts` (or `canonical_evidence_bytes()` in
+`verify.py`) for the exact byte-for-byte rule, identical in both implementations.
 
 ## Deliberate limits
 

@@ -427,10 +427,9 @@ def validate_spec_v1(bundle: dict[str, Any]) -> str | None:
 
 
 # 01.10.2026 (vNext 4.18 Claim-Zerlegung): identische Logik zu validateClaimDecomposition() in
-# core/claimDecomposition.server.ts / verify.ts -- unabhaengig gehaltener Spiegel. claim_decomposition
-# ist, wenn vorhanden, Teil der signierten Nutzlast, wird aber zusaetzlich VOR der Signaturpruefung
-# strukturell re-validiert. Bewusst OHNE die server-exklusive review.accepted_claim_ids-Pruefung --
-# der Offline-Verifier re-validiert nur die signierte Kernstruktur, bytegleich zum TS-Spiegel.
+# core/claimDecomposition.server.ts / verify.ts -- dritter, unabhaengig gehaltener Spiegel (Parity
+# zu DEVTASK_V2_SCHEMA_VERSIONS oben). claim_decomposition ist, wenn vorhanden, Teil der signierten
+# Nutzlast, wird aber zusaetzlich VOR der Signaturpruefung strukturell re-validiert.
 CLAIM_DECOMPOSER_VERSION = "claim-decomposer@1.0"
 CLAIM_ROUTING_RULE_VERSION = "claim-routing-rules@1.0"
 CLAIM_ROUTE_BY_TYPE = {
@@ -977,7 +976,145 @@ def verify_verdict_artifact_v1(artifact: dict[str, Any], trusted_key: str, verif
     return False, "verdict_derivation_mismatch"
 
 
+# 31.10.2026 (identischer Diff wie buildVerifierBindingManifestV1()/verifyVerifierBindingManifestV1()
+# in core/mrtb/evidenceBundle.server.ts UND verify.ts -- bei Aenderung dort auch hier nachziehen).
+# Schlankes, verifier-freundliches Binding fuer Dritte, die nur dieses eigenstaendige Python-Skript
+# haben, keinen Node-/core/-Zugriff. Begruendung jedes Feldes siehe dortiger ausfuehrlicherer
+# Kommentar (RFC3161 statt selbst behauptetem Zeitstempel, echter CI-Hash statt Pointer-String auf
+# validation_reference).
+def build_verifier_binding_manifest_v1(bundle: dict[str, Any]) -> dict[str, Any]:
+    if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or not bundle.get("controller_evidence"):
+        raise ValueError("unsupported_manifest_source")
+    controller = bundle["controller_evidence"]
+    base_sha = controller.get("base_commit")
+    if not base_sha:
+        raise ValueError("missing_base_sha")
+    head_sha = (controller.get("repository_state") or {}).get("result_commit")
+    if not head_sha:
+        raise ValueError("missing_head_sha")
+    diff_hash = controller.get("diff_full_sha256")
+    if not diff_hash:
+        raise ValueError("missing_diff_hash")
+    signer_key_id = bundle.get("signer_key_id")
+    if not signer_key_id:
+        raise ValueError("missing_signer_key_id")
+    task_id, attempt_number = controller.get("task_id"), controller.get("attempt_number")
+    # Gleiches Find-erstes-Match-Muster wie derive()/event() oben -- ein Trace enthaelt pro
+    # (task_id, attempt_number) hoechstens ein ci_result-Event. Anders als event() oben zusaetzlich
+    # auf task_id/attempt_number gefiltert, identisch zur TS-Seite -- bewusst strenger als der
+    # bestehende event()-Helfer, der dort nie mehrere Tasks im selben Trace unterscheiden musste.
+    ci_result = None
+    for raw in bundle.get("trace_events") or []:
+        parsed = _event_payload(raw, PREFIXES["ci"])
+        if parsed is not None and parsed.get("task_id") == task_id and parsed.get("attempt_number") == attempt_number:
+            ci_result = parsed
+            break
+    approval_attestation = bundle.get("approval_attestation")
+    return {
+        "schema_version": "verifier-binding-manifest@1.0",
+        "bundle_id": bundle.get("bundle_id"),
+        "task_id": task_id,
+        "attempt_number": attempt_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_hash": diff_hash,
+        "test_result_hash": _sha256_canonical(ci_result) if ci_result is not None else None,
+        "approval_event_hash": _sha256_canonical(approval_attestation) if approval_attestation else None,
+        "repo_state_timestamp": bundle.get("rfc3161_timestamp"),
+        "evidence_package_sha256": _sha256_canonical(bundle),
+        "signature": {"scheme": "embedded-evidence-package-ed25519", "signer_key_id": signer_key_id, "value": bundle.get("signature")},
+    }
+
+
+def verify_verifier_binding_manifest_v1(manifest: dict[str, Any], bundle: dict[str, Any], trusted_key: str,
+                                         approval_key: str | None = None) -> tuple[bool, str | None]:
+    """trusted_key ist hier Pflicht (kein Keystore-Fallback wie im core-Pendant, identisches
+    Verhalten zu verify() oben). Prueft zusaetzlich zur Herleitung jeden der drei Dritten-pruefbaren
+    Anker selbst (Bundle-Signatur, Freigabe-Signatur unabhaengig von approval_attestation_required,
+    RFC3161-TSA-Kette) -- identischer Grund wie im core-/TS-Pendant."""
+    try:
+        expected = build_verifier_binding_manifest_v1(bundle)
+    except ValueError as error:
+        return False, str(error)
+    if canonical_evidence_bytes(manifest) != canonical_evidence_bytes(expected):
+        return False, "manifest_derivation_mismatch"
+
+    bundle_ok, bundle_reason = verify(bundle, trusted_key, approval_key)
+    if not bundle_ok and bundle_reason not in ("non_verified_outcome:failed", "non_verified_outcome:inconclusive"):
+        return False, f"source_bundle_{bundle_reason or 'verification_failed'}"
+
+    attestation = bundle.get("approval_attestation")
+    if attestation:
+        if not approval_key:
+            return False, "missing_approval_trust_anchor"
+        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+            return False, "untrusted_approval_signer"
+        approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
+        if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):
+            return False, "invalid_approval_signature"
+
+    timestamp = bundle.get("rfc3161_timestamp")
+    if timestamp:
+        binding_ok, binding_reason = verify_rfc3161_binding(bundle)
+        if not binding_ok:
+            return False, f"rfc3161_{binding_reason or 'invalid'}"
+        chain_ok, chain_reason = verify_rfc3161_tsa_chain(timestamp)
+        if not chain_ok:
+            return False, f"rfc3161_tsa_{chain_reason or 'invalid'}"
+
+    return True, None
+
+
+# 31.10.2026 (identischer Diff wie runManifestSubcommand() in verify.ts -- bei Aenderung dort auch
+# hier nachziehen): eigenes Subcommand statt eines weiteren schema-Zweigs im Haupt-main() unten --
+# VerifierBindingManifestV1 ist bewusst kompakt (kein eingebettetes source_bundle), braucht also
+# IMMER zwei Dateien (Manifest + das Bundle, gegen das es nachgerechnet wird), passt deshalb nicht
+# in das bestehende "eine Bundle-Datei als erstes Argument"-Modell. Anders als die TS-Seite: kein
+# automatischer Trust-Anchor-Netzwerkabruf (crossCheckTrustAnchor() existiert nur in verify.ts) --
+# trusted_key ist hier Pflichtargument, identisch zum bestehenden Pflicht-Argument im
+# Haupt-main()-Pfad unten, keine neue, dort nicht vorhandene Faehigkeit vorgetaeuscht.
+def _run_manifest_subcommand(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="verify.py manifest", description="Verify a compact VerifierBindingManifestV1 against its source bundle")
+    parser.add_argument("manifest")
+    parser.add_argument("bundle")
+    parser.add_argument("trusted_key")
+    parser.add_argument("approval_key", nargs="?")
+    args = parser.parse_args(argv)
+    with open(args.manifest, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("schema_version") != "verifier-binding-manifest@1.0":
+        print(f"Manifest verification failed: unsupported_manifest_schema ({manifest.get('schema_version')})", file=sys.stderr)
+        return 2
+    with open(args.bundle, encoding="utf-8") as handle:
+        bundle = json.load(handle)
+    with open(args.trusted_key, encoding="utf-8") as handle:
+        trusted_key = handle.read()
+    approval_key = None
+    if args.approval_key:
+        with open(args.approval_key, encoding="utf-8") as handle:
+            approval_key = handle.read()
+    ok, reason = verify_verifier_binding_manifest_v1(manifest, bundle, trusted_key, approval_key)
+    if not ok:
+        print(f"Manifest verification failed: {reason}", file=sys.stderr)
+        return 2
+    print(f"Verifier binding manifest for bundle {manifest.get('bundle_id')} "
+          f"(task {manifest.get('task_id')}, attempt {manifest.get('attempt_number')}) verified.")
+    print(f"  base_sha={manifest.get('base_sha')}")
+    print(f"  head_sha={manifest.get('head_sha')}")
+    print(f"  diff_hash={manifest.get('diff_hash')}")
+    print(f"  test_result_hash={manifest.get('test_result_hash') or '(kein CI-Ergebnis in diesem Bundle)'}")
+    print(f"  approval_event_hash={manifest.get('approval_event_hash') or '(keine Freigabe in diesem Bundle)'}")
+    timestamp = manifest.get("repo_state_timestamp")
+    if timestamp:
+        print(f"  repo_state_timestamp={timestamp.get('gen_time')} ({timestamp.get('tsa_url')})")
+    else:
+        print("  repo_state_timestamp=(kein RFC3161-Zeitstempel angehaengt)")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "manifest":
+        return _run_manifest_subcommand(sys.argv[2:])
     parser = argparse.ArgumentParser(description="Independent Python verifier for ALEX dev-task Evidence Packages")
     parser.add_argument("bundle")
     parser.add_argument("trusted_key")

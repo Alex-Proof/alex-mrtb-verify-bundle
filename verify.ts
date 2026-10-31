@@ -104,6 +104,9 @@ export interface EvidenceBundle {
   // 01.09.2026: evidence-package@2.1, Teil der signierten Nutzlast (siehe Kommentar bei
   // CustomerEvidenceV1 oben und dem Zwilling in evidenceBundle.server.ts).
   customer_evidence?: CustomerEvidenceV1;
+  /** 01.10.2026 (vNext 4.18): optional, aber wenn vorhanden Teil der signierten Ed25519-Nutzlast
+   *  -- identische Definition zu evidenceBundle.server.ts. */
+  claim_decomposition?: ClaimDecomposition;
   signature: string;
   public_key: string;
   signer_key_id?: string;
@@ -120,9 +123,6 @@ export interface EvidenceBundle {
   // (nach observer_receipt), identische Definition zu receipts.server.ts im Alex-Monorepo. Nur die
   // Huelle wird hier gepruefte -- der innere gate-Wert selbst ist fuer den Verifier opak.
   epistemic_gate?: EpistemicGateAttestationV1;
-  // 01.10.2026 (vNext 4.18 Claim-Zerlegung): wenn vorhanden, Teil der signierten Nutzlast; wird in
-  // verifyBundleObject() zusaetzlich VOR der Signaturpruefung strukturell re-validiert.
-  claim_decomposition?: ClaimDecomposition;
 }
 
 export interface ObserverReceipt {
@@ -146,14 +146,11 @@ export interface EpistemicGateAttestationV1 {
   signature: string;
 }
 
-// 01.10.2026 (vNext 4.18 Claim-Zerlegung): unabhaengig gehaltener Spiegel von
-// validateClaimDecomposition() in core/claimDecomposition.server.ts -- gleicher "kein Shared
-// Import"-Zwang wie der Rest dieser Datei, bytegleich zum eigenstaendigen Python-Verifier
-// (verify.py). claim_decomposition ist, wenn vorhanden, Teil der signierten Nutzlast (siehe
+// 01.10.2026 (vNext 4.18 Claim-Zerlegung): identischer Spiegel zu
+// core/claimDecomposition.server.ts -- gleicher "kein Shared Import"-Zwang wie der Rest dieser
+// Datei. claim_decomposition ist, wenn vorhanden, Teil der signierten Nutzlast (siehe
 // EvidenceBundle oben); diese Struktur-/Konsistenzpruefung laeuft deshalb VOR der Signaturpruefung
-// in verifyBundleObject(), identisch zur Reihenfolge in evidenceBundle.server.ts. Bewusst OHNE die
-// server-exklusive review.accepted_claim_ids-Pruefung -- der Offline-Verifier re-validiert nur die
-// signierte Kernstruktur, identisch zum Python-Spiegel.
+// in verifyBundleObject(), identisch zur Reihenfolge in evidenceBundle.server.ts.
 type ClaimType = "fact" | "logical_constraint" | "numeric" | "recommendation" | "mixed" | "unknown";
 type ClaimRoute = "retrieval" | "formal_solver" | "calculation_engine" | "human_review" | "none";
 type ClaimVerificationStatus = "pending" | "verified" | "contradicted" | "not_verifiable" | "human_review_required";
@@ -189,9 +186,9 @@ function claimId(outputHash: string, start: number, end: number, type: ClaimType
 // Verdikte zaehlt die strikte, portable Form. (Server nutzt weiter Date.parse; separate Angleichung.)
 const CLAIM_REVIEWED_AT_ISO8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
-/** Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- Logik identisch zum eigenstaendigen
- *  Python-Verifier (_verifier.py), gespiegelt von core/claimDecomposition.server.ts mit einer bewussten
- *  Abweichung: reviewed_at, siehe CLAIM_REVIEWED_AT_ISO8601 oben. */
+/** Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- Logik gespiegelt von
+ *  validateClaimDecomposition() in core/claimDecomposition.server.ts (eine bewusste Abweichung:
+ *  reviewed_at, siehe CLAIM_REVIEWED_AT_ISO8601 oben). */
 export function validateClaimDecomposition(artifact: ClaimDecomposition, originalOutput: string, requireReview = false): string | null {
   if (artifact.schema_version !== "claim-decomposition@1.0") return "unsupported_schema_version";
   if (artifact.transformer_version !== CLAIM_DECOMPOSER_VERSION) return "unsupported_transformer_version";
@@ -232,7 +229,17 @@ export function validateClaimDecomposition(artifact: ClaimDecomposition, origina
 /** Separate, explizit aufzurufende Pruefung -- verifyBundleObject() ruft diese Funktion NICHT
  *  selbst auf, identisches Muster wie verifyRfc3161Binding()/crossCheckObserverReceipt() hier und
  *  identische Definition zu verifyEpistemicGateBinding() in receipts.server.ts im Alex-Monorepo. */
-export function verifyEpistemicGateBinding(bundle: EvidenceBundle, trustedPublicKey: string): { ok: boolean; reason?: string } {
+/** receipt_chain_entry (ADR 06 / vNext 4.12) haengt als AEUSSERSTE Schicht nach epistemic_gate an
+ *  und war nie Teil einer inneren Signatur/Hash-Bindung -- jede innere Pruefung entfernt ihn zuerst.
+ *  Identisch zu withoutReceiptChainEntry() in core/mrtb/evidenceBundle.server.ts (kein Shared Import).
+ *  Der Ketten-Eintrag selbst wird von diesem Offline-Verifier NICHT geprueft. */
+export function withoutReceiptChainEntry<T extends object>(bundle: T): T {
+  const { receipt_chain_entry: _chainEntry, ...inner } = bundle as T & { receipt_chain_entry?: unknown };
+  return inner as T;
+}
+
+export function verifyEpistemicGateBinding(bundleIn: EvidenceBundle, trustedPublicKey: string): { ok: boolean; reason?: string } {
+  const bundle = withoutReceiptChainEntry(bundleIn);
   if (!bundle.epistemic_gate) return { ok: false, reason: "epistemic_gate_not_attached" };
   const { epistemic_gate, ...withoutGate } = bundle;
   const { signature, public_key, signer_key_id, ...payload } = epistemic_gate;
@@ -262,7 +269,8 @@ export function verifyEpistemicGateBinding(bundle: EvidenceBundle, trustedPublic
  *  angehaengt (attachRfc3161Timestamp -> attachApprovalAttestation -> attachObserverReceipt) und
  *  fehlte hier bisher im Ausschluss -- seit Einfuehrung von observer_receipt (05.09.2026) scheiterte
  *  die Bindung bei jedem zusaetzlich vom Observer bezeugten Bundle deterministisch. */
-export function verifyRfc3161Binding(bundle: EvidenceBundle): { ok: boolean; reason?: string } {
+export function verifyRfc3161Binding(bundleIn: EvidenceBundle): { ok: boolean; reason?: string } {
+  const bundle = withoutReceiptChainEntry(bundleIn);
   if (!bundle.rfc3161_timestamp) return { ok: false, reason: "no_timestamp_present" };
   const { rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...withoutTimestamp } = bundle;
   const recomputed = sha256(JSON.stringify(withoutTimestamp));
@@ -528,6 +536,103 @@ export function verifyVerdictArtifactV1(
     : { ok: false, reason: "verdict_derivation_mismatch" };
 }
 
+// 30.10.2026 (identischer Diff wie core/mrtb/evidenceBundle.server.ts -- bei Aenderung dort auch
+// hier nachziehen, gleiches "kein Shared Import"-Prinzip wie der Rest dieser Datei): schlankes,
+// verifier-freundliches Binding fuer Dritte, die nur dieses eigenstaendige Skript haben, kein
+// core/. Ausfuehrliche Begruendung jedes Feldes (RFC3161 statt selbst behauptetem Zeitstempel,
+// echter CI-Hash statt Pointer-String auf validation_reference) siehe dortiger Kommentar.
+export interface VerifierBindingManifestV1 {
+  schema_version: "verifier-binding-manifest@1.0";
+  bundle_id: string;
+  task_id: string;
+  attempt_number: number;
+  base_sha: string;
+  head_sha: string;
+  diff_hash: string;
+  test_result_hash: string | null;
+  approval_event_hash: string | null;
+  repo_state_timestamp: Rfc3161Timestamp | null;
+  evidence_package_sha256: string;
+  signature: { scheme: "embedded-evidence-package-ed25519"; signer_key_id: string; value: string };
+}
+
+interface DevTaskCiResultTraceEventForManifest {
+  task_id: string;
+  attempt_number: number;
+  result_commit: string;
+  conclusion: "success" | "failure" | "pending" | "none";
+  checked_at: string;
+  source: "github_checks_and_statuses";
+  checks?: Array<{ name: string; conclusion: string }>;
+}
+
+export function buildVerifierBindingManifestV1(bundle: EvidenceBundle): VerifierBindingManifestV1 {
+  if (!isDevTaskV2Schema(bundle.schema_version) || !bundle.controller_evidence) throw new Error("unsupported_manifest_source");
+  const controller = bundle.controller_evidence;
+  if (!controller.base_commit) throw new Error("missing_base_sha");
+  const headSha = controller.repository_state?.result_commit;
+  if (!headSha) throw new Error("missing_head_sha");
+  if (!controller.diff_full_sha256) throw new Error("missing_diff_hash");
+  if (!bundle.signer_key_id) throw new Error("missing_signer_key_id");
+  const ciResult = bundle.trace_events
+    .map((e) => parseDevTaskEvent<DevTaskCiResultTraceEventForManifest>(e, DEVTASK_CI_RESULT_PREFIX))
+    .find((e): e is DevTaskCiResultTraceEventForManifest => e !== null && e.task_id === controller.task_id && e.attempt_number === controller.attempt_number)
+    ?? null;
+  return {
+    schema_version: "verifier-binding-manifest@1.0",
+    bundle_id: bundle.bundle_id,
+    task_id: controller.task_id,
+    attempt_number: controller.attempt_number,
+    base_sha: controller.base_commit,
+    head_sha: headSha,
+    diff_hash: controller.diff_full_sha256,
+    test_result_hash: ciResult ? sha256Canonical(ciResult) : null,
+    approval_event_hash: bundle.approval_attestation ? sha256Canonical(bundle.approval_attestation) : null,
+    repo_state_timestamp: bundle.rfc3161_timestamp ?? null,
+    evidence_package_sha256: sha256Canonical(bundle),
+    signature: { scheme: "embedded-evidence-package-ed25519", signer_key_id: bundle.signer_key_id, value: bundle.signature },
+  };
+}
+
+/** trustedPublicKey ist hier (anders als in core/mrtb/evidenceBundle.server.ts) PFLICHT, kein
+ *  Fallback auf einen lokalen Keystore -- dieses Skript hat offline keinen Zugriff darauf, gleiches
+ *  Muster wie verifyVerdictArtifactV1() oben. Prueft zusaetzlich zur Herleitung jeden der drei
+ *  Dritten-pruefbaren Anker selbst (Bundle-Signatur, Freigabe-Signatur unabhaengig von
+ *  approval_attestation_required, RFC3161-TSA-Kette) -- identischer Grund wie im core-Pendant. */
+export function verifyVerifierBindingManifestV1(
+  manifest: VerifierBindingManifestV1, bundle: EvidenceBundle, trustedPublicKey: string, trustedApprovalPublicKey?: string,
+): { ok: boolean; reason?: string } {
+  let expected: VerifierBindingManifestV1;
+  try { expected = buildVerifierBindingManifestV1(bundle); }
+  catch (error) { return { ok: false, reason: error instanceof Error ? error.message : "invalid_manifest_source" }; }
+  if (canonicalEvidenceJson(manifest) !== canonicalEvidenceJson(expected)) return { ok: false, reason: "manifest_derivation_mismatch" };
+
+  const bundleCheck = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey);
+  if (!bundleCheck.ok && bundleCheck.reason !== "non_verified_outcome:failed" && bundleCheck.reason !== "non_verified_outcome:inconclusive") {
+    return { ok: false, reason: `source_bundle_${bundleCheck.reason ?? "verification_failed"}` };
+  }
+
+  if (bundle.approval_attestation) {
+    if (!trustedApprovalPublicKey) return { ok: false, reason: "missing_approval_trust_anchor" };
+    const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = bundle.approval_attestation;
+    if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) {
+      return { ok: false, reason: "untrusted_approval_signer" };
+    }
+    if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) {
+      return { ok: false, reason: "invalid_approval_signature" };
+    }
+  }
+
+  if (bundle.rfc3161_timestamp) {
+    const binding = verifyRfc3161Binding(bundle);
+    if (!binding.ok) return { ok: false, reason: `rfc3161_${binding.reason ?? "invalid"}` };
+    const chain = verifyRfc3161TsaChain(bundle.rfc3161_timestamp);
+    if (!chain.ok) return { ok: false, reason: `rfc3161_tsa_${chain.reason ?? "invalid"}` };
+  }
+
+  return { ok: true };
+}
+
 // vNext 4.8 "Agent Passport" (kein Shared Import, siehe Datei-Header oben -- identischer Diff wie
 // core/agentPassportHistoryVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
 // tests/dev-workflow/verify-bundle-duplicate-logic-drift.test.ts (27.09.2026) faehrt beide
@@ -589,10 +694,6 @@ export function verifyAgentPassportHistoryV1(bundle: AgentPassportHistoryExportV
   return validSignature ? { ok: true } : { ok: false, reason: "invalid_signature" };
 }
 
-// Agent Passport Card (vNext): kompakte, signierte Projektion einer Identity-Linie auf eine Akte.
-// identity_line_id = sha256(canonical({adapter_binary_hash, model_version, tool_manifest,
-// enforcement_class})); barcode/qr sind reine Projektionen derselben Identity. Spiegel zu
-// core/agentPassportCard.server.ts (kein Shared Import), bytegleich zum Python-Verifier.
 export interface AgentPassportCardArtifactV1 {
   schema_version: "agent-passport-card@1.0";
   passport: { model_version: string; tool_manifest: string[]; enforcement_class: string; adapter_binary_hash?: string | null; [key: string]: unknown };
@@ -693,8 +794,8 @@ export function verifyChallengeResponseArtifactV1(artifact: ChallengeResponseArt
 
 // php-exposure-evidence@1.0 (PHP2Shell, CVE-2026-109618/CVE-2026-109619, 22.10.2026 -- kein Shared
 // Import, siehe Datei-Header oben; identischer Diff wie core/phpExposureEvidence.server.ts +
-// core/phpExposureEvidenceVerify.server.ts im privaten alex-core-Repo, bei jeder Aenderung dort
-// auch hier nachziehen).
+// core/phpExposureEvidenceVerify.server.ts, bei jeder Aenderung dort auch hier nachziehen).
+// Gleicher Drift-Test wie oben: tests/dev-workflow/verify-bundle-duplicate-logic-drift.test.ts.
 //
 // PHP2Shell-Fakten (geprueft 22.10.2026): CVE-2026-109618 = GHSA-w8hw-w9fx-j79w (Core,
 // Zustandskorruption via Bailout/OOM), CVE-2026-109619 = GHSA-6wmf-4rv5-p3rp (Use-after-free ueber
@@ -1201,7 +1302,7 @@ interface DevTaskExecutionContextTraceEvent {
   attempt_number: number;
   sandbox_reference: string | null;
   execution_reference: string;
-  executor: "deepseek" | "hermes" | "opencode" | "aider" | "cline";
+  executor: "deepseek" | "hermes" | "opencode" | "aider" | "cline" | "buzz";
   harness_id: string;
   adapter_version: string;
   adapter_version_sha256: string;
@@ -1786,7 +1887,8 @@ export function deriveDevTaskV2Outcome(events: string[], controller: DevTaskCont
 const CLAIM_LADDER_RANK: Record<EvidenceBundle["claim_ladder"], number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 function claimLadderRank(ladder: EvidenceBundle["claim_ladder"]): number { return CLAIM_LADDER_RANK[ladder]; }
 
-export function verifyBundleObject(bundle: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"] } {
+export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"] } {
+  const bundle = withoutReceiptChainEntry(bundleIn);
   // rfc3161_timestamp/observer_receipt/epistemic_gate werden IMMER erst nach dem Signieren
   // angehaengt -- waren nie Teil der signierten Nutzlast, muessen hier ebenso ausgeschlossen
   // werden (siehe verifyRfc3161Binding()/crossCheckObserverReceipt()/verifyEpistemicGateBinding()
@@ -2137,7 +2239,8 @@ function reportedAnchorStatus(anchor: unknown): ObserverCheckResult["anchor_stat
  *  Merkle-Inclusion-Proof selbst nach. Eine Bitcoin-Bestaetigung wird hier NICHT kryptografisch
  *  geprueft. Der vom Observer gemeldete Status wird deshalb nur als
  *  `observer_reported_bitcoin_confirmed` ausgegeben und nicht als eigener Bitcoin-Nachweis. */
-export async function crossCheckObserverReceipt(bundle: EvidenceBundle): Promise<ObserverCheckResult> {
+export async function crossCheckObserverReceipt(bundleIn: EvidenceBundle): Promise<ObserverCheckResult> {
+  const bundle = withoutReceiptChainEntry(bundleIn);
   if (!bundle.observer_receipt) return { ok: false, reason: "not_applicable_no_observer_receipt" };
   // 26.09.2026: epistemic_gate haengt NACH observer_receipt an (attachEpistemicGateAttestation(),
   // host/receipts.server.ts) -- gleicher Ausschluss noetig wie rfc3161_timestamp/approval_attestation
@@ -2234,6 +2337,12 @@ export interface ProofPolicy {
      *  dortiger Kommentar fuer die volle Begruendung ("blind-spot coverage", Downgrade-Schutz). */
     epistemic_gate?: "required";
   };
+  /** 03.10.2026: identischer Diff wie evidenceBundle.server.ts -- siehe dortiger Kommentar fuer die
+   *  volle Begruendung (Agent-/Tenant-Scoping, fail-closed ohne das Feld). */
+  applies_to?: {
+    agent_types?: string[];
+    tenant_plan?: string[];
+  };
 }
 
 export interface ProofPolicyEvaluation {
@@ -2244,12 +2353,31 @@ export interface ProofPolicyEvaluation {
   evaluated: Record<string, { required: unknown; satisfied: boolean }>;
 }
 
+/** Identischer Diff wie evidenceBundle.server.ts -- siehe dortiger Kommentar. */
+function proofPolicyAppliesTo(
+  policy: ProofPolicy,
+  context: { agentType?: string; tenantPlan?: string },
+): boolean {
+  const { applies_to } = policy;
+  if (!applies_to) return true;
+  if (applies_to.agent_types !== undefined) {
+    if (context.agentType === undefined || !applies_to.agent_types.includes(context.agentType)) return false;
+  }
+  if (applies_to.tenant_plan !== undefined) {
+    if (context.tenantPlan === undefined || !applies_to.tenant_plan.includes(context.tenantPlan)) return false;
+  }
+  return true;
+}
+
 export function evaluateProofPolicy(
   policy: ProofPolicy,
   bundle: EvidenceBundle,
-  context: { effectiveClaimLadder: ClaimLadder; verifierChecks: Record<string, string> },
+  context: { effectiveClaimLadder: ClaimLadder; verifierChecks: Record<string, string>; agentType?: string; tenantPlan?: string },
   trustedPublicKey?: string,
 ): ProofPolicyEvaluation {
+  if (!proofPolicyAppliesTo(policy, context)) {
+    return { policy_id: policy.policy_id, gates_action: policy.gates_action, allowed: true, blocked_by: [], evaluated: {} };
+  }
   const evaluated: Record<string, { required: unknown; satisfied: boolean }> = {};
   const blockedBy: string[] = [];
   const record = (name: string, required: unknown, satisfied: boolean) => {
@@ -2282,11 +2410,78 @@ export function evaluateProofPolicy(
   return { policy_id: policy.policy_id, gates_action: policy.gates_action, allowed: blockedBy.length === 0, blocked_by: blockedBy, evaluated };
 }
 
+// 31.10.2026: eigenes Subcommand statt eines weiteren schema_version-Zweigs unten -- das
+// Binding-Manifest ist bewusst kompakt (kein eingebettetes source_bundle wie VerdictArtifactV1),
+// braucht also IMMER zwei Dateien (Manifest + das Bundle, gegen das es nachgerechnet wird). Das
+// passt nicht in das bestehende "eine Datei als argv[2]"-Modell, ohne es zu verbiegen -- ein
+// expliziter Verb ("manifest") macht die Zwei-Dateien-Erwartung sofort sichtbar, statt sie ueber
+// Positionsraten (argv[2] mal Bundle, mal Manifest) zu verschleiern. Der bestehende Ein-Datei-Pfad
+// fuer Bundles/Verdict-Akten bleibt unangetastet.
+async function runManifestSubcommand(): Promise<void> {
+  const manifestPath = process.argv[3];
+  const bundlePath = process.argv[4];
+  if (!manifestPath || !bundlePath) {
+    console.error("Usage: alex-verify manifest <manifest.json> <bundle.json> [controller-key.pem] [approval-key.pem]");
+    console.error("  Ohne controller-key.pem: der Trust-Anchor wird automatisch gegen mehrere unabhaengige Kanaele geprueft.");
+    process.exitCode = 1;
+    return;
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as VerifierBindingManifestV1;
+  if (manifest.schema_version !== "verifier-binding-manifest@1.0") {
+    console.error(`Manifest verification failed: unsupported_manifest_schema (${String((manifest as { schema_version?: unknown }).schema_version)})`);
+    process.exitCode = 2;
+    return;
+  }
+  const bundle = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle;
+
+  let trustedPublicKey = process.argv[5] ? readFileSync(process.argv[5], "utf-8") : undefined;
+  let trustedApprovalPublicKey = process.argv[6] ? readFileSync(process.argv[6], "utf-8") : undefined;
+  if (!trustedPublicKey) {
+    const consensus = await crossCheckTrustAnchor("evidence_package");
+    printConsensus("evidence_package", consensus);
+    if (consensus.agreed_public_key_pem) trustedPublicKey = consensus.agreed_public_key_pem;
+  }
+  // Anders als der bestehende Bundle-Pfad weiter unten (der approval_attestation_required
+  // voraussetzt): verifyVerifierBindingManifestV1() prueft approval_attestation IMMER unabhaengig
+  // nach, wenn sie vorhanden ist (siehe dortiger Kommentar) -- die automatische Trust-Anchor-Suche
+  // muss deshalb an derselben, nicht an der engeren Bedingung haengen, sonst waere approval_key
+  // hier seltener gefunden als die Pruefung ihn tatsaechlich braucht.
+  if (!trustedApprovalPublicKey && bundle.approval_attestation) {
+    const consensus = await crossCheckTrustAnchor("human_approval");
+    printConsensus("human_approval", consensus);
+    if (consensus.agreed_public_key_pem) trustedApprovalPublicKey = consensus.agreed_public_key_pem;
+  }
+  if (!trustedPublicKey) {
+    console.error("Manifest verification failed: trusted evidence key unavailable");
+    process.exitCode = 2;
+    return;
+  }
+
+  const result = verifyVerifierBindingManifestV1(manifest, bundle, trustedPublicKey, trustedApprovalPublicKey);
+  if (!result.ok) {
+    console.error(`❌ Manifest verification failed: ${result.reason}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log(`✅ Verifier binding manifest for bundle ${manifest.bundle_id} (task ${manifest.task_id}, attempt ${manifest.attempt_number}) verified.`);
+  console.log(`   base_sha=${manifest.base_sha}`);
+  console.log(`   head_sha=${manifest.head_sha}`);
+  console.log(`   diff_hash=${manifest.diff_hash}`);
+  console.log(`   test_result_hash=${manifest.test_result_hash ?? "(kein CI-Ergebnis in diesem Bundle)"}`);
+  console.log(`   approval_event_hash=${manifest.approval_event_hash ?? "(keine Freigabe in diesem Bundle)"}`);
+  console.log(`   repo_state_timestamp=${manifest.repo_state_timestamp ? `${manifest.repo_state_timestamp.gen_time} (${manifest.repo_state_timestamp.tsa_url})` : "(kein RFC3161-Zeitstempel angehaengt)"}`);
+}
+
 async function main() {
+  if (process.argv[2] === "manifest") {
+    return runManifestSubcommand();
+  }
+
   const bundlePath = process.argv[2];
   if (!bundlePath) {
     console.error("Usage: verify <bundle.json> [controller-key.pem] [approval-key.pem] [validation.json evidence-key.pem review.json reviewer-key.pem]");
     console.error("  Ohne controller-key.pem: der Trust-Anchor wird automatisch gegen mehrere unabhaengige Kanaele geprueft.");
+    console.error("Usage: alex-verify manifest <manifest.json> <bundle.json> [controller-key.pem] [approval-key.pem]");
     process.exitCode = 1;
     return;
   }
