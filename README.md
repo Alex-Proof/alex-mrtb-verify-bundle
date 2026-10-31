@@ -61,6 +61,31 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
+**Zuletzt bearbeitet:** 2026-10-31 (Vertrauensgrenze getestet: gueltiger Token vs. vertraute TSA --
+dabei einen echten TS<->Python-Reason-Code-Drift gefunden und gefixt)
+**Von:** Alex-Proof
+
+SaSames dritte Rueckfrage: einen echten, korrekt signierten RFC3161-Token von einer NICHT
+gepinnten Root einsetzen -- Herleitung und Message-Imprint-Bindung muessen bestehen, erst die
+Vertrauenskette selbst muss getrennt scheitern. Beweist, dass "gueltiger Token" nicht mit
+"vertraute TSA" verwechselt wird.
+
+Neuer Test (`test/verifier-binding-manifest-rfc3161-trust-boundary.test.mjs`) baut dafuer zur
+Laufzeit per System-OpenSSL eine eigene, bewusst NICHT FreeTSA-abstammende Root-CA + TSA-
+Zertifikat und laesst damit einen echten RFC3161-Token fuer genau den richtigen Digest ausstellen.
+`verifyRfc3161Binding()`: `ok:true` (der Token passt zum Bundle). `verifyRfc3161TsaChain()`:
+`chain_untrusted` (Signer echt, Signatur intern gueltig, aber nie von der gepinnten Root
+ausgestellt). **Dabei ein echter, bis dahin nie gepruefter Drift gefunden:** der eigenstaendige
+Python-Verifier delegiert die Kettenpruefung komplett an `openssl ts -verify` und fiel fuer genau
+diesen Fall bisher auf einen generischen `tsa_chain_verification_failed` zurueck, waehrend
+`verify.ts` (eigene ASN.1-Kettenpruefung) `chain_untrusted` liefert -- keiner der vorherigen Tests
+hatte je einen Token von einer wirklich unbekannten Root, der Drift blieb unentdeckt. Gefixt: die
+Python-Seite liest jetzt OpenSSLs eigene, stabile Verify-Fehlertexte (`self-signed certificate in
+certificate chain` u.ae.) und meldet denselben `chain_untrusted`-Code. Byte-gleich in TS und
+Python. 61 Tests gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-31 (Nachtrag: RFC3161-Bindung an einem echten, aber fuer ein
 ANDERES Bundle ausgestellten FreeTSA-Token isoliert getestet)
 **Von:** Alex-Proof

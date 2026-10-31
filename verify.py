@@ -151,9 +151,28 @@ def verify_rfc3161_tsa_chain(timestamp: dict[str, Any]) -> tuple[bool, str | Non
             result = subprocess.run(
                 ["openssl", "ts", "-verify", "-in", token_path, "-token_in",
                  "-digest", digest, "-CAfile", root_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, text=True,
             )
-            return (True, None) if result.returncode == 0 else (False, "tsa_chain_verification_failed")
+            if result.returncode == 0:
+                return True, None
+            # 31.10.2026 (SaSame @sasame-mcp.bsky.social, Trust-Boundary-Haertungstest): live
+            # gefunden -- ein echter, korrekt signierter Token von einer NICHT gepinnten Root fiel
+            # hier bisher IMMER auf den generischen "tsa_chain_verification_failed" zurueck, waehrend
+            # verify.ts/evidenceBundle.server.ts (eigene ASN.1-Kettenpruefung statt openssl ts
+            # -verify) fuer denselben Fall "chain_untrusted" liefert -- ein echter, bis zu diesem
+            # Test nie geprueften Reason-Code-Drift zwischen den beiden Implementierungen. OpenSSL
+            # selbst unterscheidet das sehr wohl (stabile X509_verify_cert_error_string()-Texte,
+            # ts_rsp_verify.c meldet sie 1:1 durch); hier auf die bekannten "wir vertrauen der
+            # Root/dem Aussteller nicht"-Varianten gemappt, alles andere bleibt ehrlich generisch.
+            stderr = result.stderr or ""
+            untrusted_markers = (
+                "self-signed certificate in certificate chain",
+                "unable to get local issuer certificate",
+                "unable to verify the first certificate",
+            )
+            if any(marker in stderr for marker in untrusted_markers):
+                return False, "chain_untrusted"
+            return False, "tsa_chain_verification_failed"
     except OSError:
         return False, "openssl_unavailable"
 
