@@ -61,6 +61,27 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
+**Zuletzt bearbeitet:** 2026-10-31 (Nachtrag: RFC3161-Bindung an einem echten, aber fuer ein
+ANDERES Bundle ausgestellten FreeTSA-Token isoliert getestet)
+**Von:** Alex-Proof
+
+SaSame prüfte die beiden vorherigen Haertungstests nach und fand eine Luecke: beide scheitern
+schon VOR der RFC3161-Pruefung selbst (ueber `manifest_derivation_mismatch`), keiner beweist,
+dass die RFC3161-Bindung tatsaechlich etwas prueft. Sein Gegenvorschlag: einen echten, bei
+FreeTSA gueltigen Token eines ANDEREN Bundles einsetzen -- das unveraenderte Bundle muss die
+Herleitung bestehen, und erst DANACH muss die Bindung selbst wegen des falschen Hashes scheitern.
+
+Neuer Testfall, drittes Quell-Bundle bewusst synthetisch (kein `approval_attestation`): alle vier
+echten Fixtures mit vollstaendigen Feldern haben `approval_attestation_required=true`, dessen
+`bundle_sha256`-Pruefung einen Token-Tausch VORHER abfaengt (der Hash wurde ueber den
+urspruenglichen Token berechnet) -- das haette dieselbe Maskierung nur eine Ebene tiefer wieder
+erzeugt. Ergebnis: `verifyRfc3161TsaChain()` bestaetigt den fremden Token als echt und gueltig
+signiert (`{ok: true}`) -- die Herleitung passt (das Manifest wird korrekt aus dem jetzt
+fremd-datierten Bundle neu gebaut, nichts weicht ab) -- und erst dann scheitert die Pruefung
+exakt mit `rfc3161_timestamp_hash_mismatch`. Byte-gleich in TS und Python. 60 Tests gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-31 (Haertungsvorschlag umgesetzt: RFC3161-Bindung an echtem Token
 adversarial getestet)
 **Von:** Alex-Proof
