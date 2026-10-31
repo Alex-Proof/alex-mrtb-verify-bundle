@@ -61,6 +61,23 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
+**Zuletzt bearbeitet:** 2026-10-31 (Haertungsvorschlag umgesetzt: RFC3161-Bindung an echtem Token
+adversarial getestet)
+**Von:** Alex-Proof
+
+Vorschlag von aussen (SaSame, @sasame-mcp.bsky.social): nach Ausstellung des RFC3161-Tokens einmal
+nur ein Manifest-Feld faelschen (Token unangetastet), einmal umgekehrt das Manifest unangetastet
+lassen und das Bundle darunter veraendern -- beides muss scheitern, sonst bindet der Zeitstempel
+nur grob "irgendein Lauf", nicht die exakten Beweis-Bytes. Neuer Test
+(`test/verifier-binding-manifest-rfc3161-adversarial.test.mjs`) gegen ein ECHTES, bei FreeTSA
+bezogenes Token (`independence/demo-pr-38.json`, kein Mock): beide Faelschungen fallen auf
+`manifest_derivation_mismatch` -- bei der Bundle-Faelschung schon ueber `evidence_package_sha256`
+(bindet das GESAMTE Bundle, nicht nur die sechs genannten Anker), bevor ueberhaupt die
+RFC3161-Pruefung oder die Ed25519-Signatur erreicht wird. Byte-gleich in TS und Python. 59 Tests
+gruen.
+
+---
+
 **Zuletzt bearbeitet:** 2026-10-31 (kompaktes Verifier-Binding-Manifest: `verifier-binding-manifest@1.0`)
 **Von:** Alex-Proof
 
