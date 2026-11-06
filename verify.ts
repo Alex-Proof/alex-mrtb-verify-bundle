@@ -1,4 +1,4 @@
-import { createHash, verify, X509Certificate } from "node:crypto";
+import { createHash, createPublicKey, verify, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2089,6 +2089,10 @@ export interface TrustAnchorConsensus {
   agreement_count: number;
   total_channels: number;
   divergent: boolean;
+  // 06.11.2026: merged across all channels (deduplicated per key_id, an entry WITH
+  // rekor_tlog_entry wins if the same key is reported inconsistently with/without proof) --
+  // lets checkSignerNotRevokedAfterEvidenceTime() below work without re-querying the channels.
+  revocations: RevocationRecordV1[];
 }
 
 /** Fragt alle bekannten Kanaele unabhaengig ab und meldet explizit, wie viele denselben Key-Id
@@ -2103,6 +2107,7 @@ export async function crossCheckTrustAnchor(
   channels: string[] = DEFAULT_TRUST_ANCHOR_CHANNELS,
 ): Promise<TrustAnchorConsensus> {
   const results: TrustAnchorChannelResult[] = [];
+  const revocationsByKeyId = new Map<string, RevocationRecordV1>();
   for (const url of channels) {
     try {
       const res = await fetch(url);
@@ -2111,6 +2116,16 @@ export async function crossCheckTrustAnchor(
       const keyId: string | null = purpose === "evidence_package" ? (data.key_id ?? null) : (data.approval_signer?.key_id ?? null);
       const pem: string | null = purpose === "evidence_package" ? (data.public_key_pem ?? null) : (data.approval_signer?.public_key_pem ?? null);
       results.push({ url, key_id: keyId, public_key_pem: pem });
+      // 06.11.2026: trust_anchor_registry.revocations[] has been published alongside
+      // /.well-known/alex-pubkey.json for a while -- crossCheckTrustAnchor() ignored it until now.
+      const revocations = data.trust_anchor_registry?.revocations;
+      if (Array.isArray(revocations)) {
+        for (const record of revocations as RevocationRecordV1[]) {
+          if (!record?.key_id) continue;
+          const existing = revocationsByKeyId.get(record.key_id);
+          if (!existing || (!existing.rekor_tlog_entry && record.rekor_tlog_entry)) revocationsByKeyId.set(record.key_id, record);
+        }
+      }
     } catch (error) {
       results.push({ url, key_id: null, public_key_pem: null, error: error instanceof Error ? error.message : String(error) });
     }
@@ -2125,6 +2140,7 @@ export async function crossCheckTrustAnchor(
   return {
     purpose, channels: results, agreed_key_id: agreedKeyId, agreed_public_key_pem: agreedPem,
     agreement_count: agreementCount, total_channels: channels.length, divergent: distinctKeyIds.size > 1,
+    revocations: [...revocationsByKeyId.values()],
   };
 }
 
@@ -2136,6 +2152,176 @@ function printConsensus(label: string, consensus: TrustAnchorConsensus): void {
   if (consensus.divergent) {
     console.warn(`   ⚠ Kanaele weichen voneinander ab -- moeglicher Trust-Anchor-Kompromiss oder veraltete Kopie. Nicht stillschweigend ignorieren.`);
   }
+}
+
+// 05.11.2026 (Rekor-Stapling, SaSame/DM: "Until then one live fetch stays" -- should not stay that
+// way): identical form to core/mrtb/evidenceBundle.server.ts RevocationRecordV1/RekorTlogEntryV1
+// in the private source (no shared import, see file header) -- change one, change both. Closes
+// the gap that a compromised backend could invent/backdate a revocation entry after the fact:
+// Rekor (the public Sigstore transparency log) publicly and immutably attests that exactly this
+// (hash, signature, public_key) triple existed at that time -- verifyRekorStapling() below checks
+// that independently of our own endpoint.
+export interface RekorTlogEntryV1 {
+  schema_version: "rekor-tlog-entry@1.0";
+  entry_uuid: string; log_index: number; log_id: string; integrated_time: number; body: string;
+  inclusion_proof: { log_index: number; root_hash: string; tree_size: number; hashes: string[]; checkpoint: string };
+  submitted_at: string;
+}
+export interface RevocationRecordV1 {
+  key_id: string; public_key_pem: string; valid_from: string; revoked_at: string; reason: string; replaced_by: string | null;
+  self_attestation_signature?: string;
+  rekor_tlog_entry?: RekorTlogEntryV1;
+}
+
+/** Shape that @sigstore/verify's internal (not "public" in the package.json "exports" sense, but
+ *  freely path-importable since the package.json has no "exports" field) tlog-check code expects
+ *  as input. Deliberately defined locally instead of imported from @sigstore/bundle/
+ *  @sigstore/protobuf-specs -- their bundle protobuf shape additionally assumes a signature
+ *  verification incompatible with our raw Ed25519 PureEdDSA scheme (sign(null, data, key)) (Node
+ *  refuses crypto.verify("sha256", ..., ed25519Key, ...) -- see comment below in
+ *  verifyRekorStapling()), which we don't need here anyway: we verify hash/signature/pubkey
+ *  ourselves via the raw Ed25519 path already established in this repo; @sigstore/verify is used
+ *  ONLY for the Merkle inclusion + checkpoint signature check (the part you should not reimplement
+ *  yourself per RFC 6962). Exact pinned version in package.json (3.1.1) keeps this deep import
+ *  stable. */
+interface SigstoreTLogAuthorityShape { logID: Buffer; baseURL: string; publicKey: ReturnType<typeof createPublicKey>; validFor: { start: Date; end: Date } }
+interface SigstoreTransparencyLogEntryShape {
+  logIndex: string; logId: { keyId: Buffer }; kindVersion: { kind: string; version: string }; integratedTime: string;
+  inclusionPromise?: { signedEntryTimestamp: Buffer };
+  inclusionProof: { logIndex: string; rootHash: Buffer; treeSize: string; hashes: Buffer[]; checkpoint: { envelope: string } };
+  canonicalizedBody: Buffer;
+}
+
+const REKOR_BASE_URL = "https://rekor.sigstore.dev";
+
+/** Independent check of ONE RevocationRecordV1 with self_attestation_signature + rekor_tlog_entry.
+ *  Fetches Rekor's current public key live (not from our own endpoint, not from the checked entry
+ *  itself), and checks three independent steps: (1) self_attestation_signature is a valid Ed25519
+ *  signature over the record (without rekor_tlog_entry AND without self_attestation_signature
+ *  itself) under the public_key_pem claimed in the record -- the revoked key thereby attests its
+ *  own revocation offline, independent of Rekor; (2) the hash embedded in Rekor's log entry
+ *  ("body") really matches the canonical record INCLUDING the self-attestation (otherwise an
+ *  attacker could substitute a REAL Rekor entry created for DIFFERENT content); (3) Merkle
+ *  inclusion + checkpoint signature are valid (real Sigstore cryptography, not reimplemented).
+ *  Rekor's own "outer" hashedrekord signature is NOT re-checked -- it comes from a disposable key
+ *  with no trust of its own; its validity was already enforced by Rekor at submit time, and any
+ *  later change to the body breaks (3) anyway. Only once (1)-(3) hold is it proven that this
+ *  revocation REALLY existed at the claimed time -- not invented/backdated after the fact by a
+ *  compromised backend. */
+export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{ ok: boolean; reason?: string }> {
+  const entry = record.rekor_tlog_entry;
+  if (!entry) return { ok: false, reason: "no_rekor_tlog_entry" };
+  if (entry.schema_version !== "rekor-tlog-entry@1.0") return { ok: false, reason: "unsupported_rekor_tlog_entry_schema" };
+  if (!record.self_attestation_signature) return { ok: false, reason: "no_self_attestation_signature" };
+
+  let body: any;
+  try {
+    body = JSON.parse(Buffer.from(entry.body, "base64").toString("utf8"));
+  } catch {
+    return { ok: false, reason: "rekor_body_not_valid_json" };
+  }
+  if (body.kind !== "hashedrekord") return { ok: false, reason: "rekor_body_unexpected_kind" };
+
+  // Step (1): self-attestation -- independent of Rekor, checkable with the public_key_pem
+  // already contained in the record itself.
+  const { rekor_tlog_entry: _omitEntry, self_attestation_signature: _omitSig, ...baseRecord } = record;
+  const baseArtifact = Buffer.from(canonicalEvidenceJson(baseRecord), "utf8");
+  // Ed25519/PureEdDSA requires algorithm=null for Node's crypto.verify() (unlike RSA/ECDSA, which
+  // always expect a hash-algorithm string) -- exactly why this does NOT use @sigstore/verify's
+  // higher-level Verifier/SignedEntity API (see type comment above).
+  if (!verify(null, baseArtifact, record.public_key_pem, Buffer.from(record.self_attestation_signature, "base64"))) {
+    return { ok: false, reason: "self_attestation_signature_invalid" };
+  }
+
+  // Step (2): Rekor hashed/logged exactly the record INCLUDING this self-attestation.
+  const { rekor_tlog_entry: _omit, ...attestedRecord } = record;
+  const artifact = Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8");
+  const expectedHash = createHash("sha256").update(artifact).digest("hex");
+  if (body.spec?.data?.hash?.algorithm !== "sha256" || body.spec.data.hash.value !== expectedHash) {
+    return { ok: false, reason: "rekor_body_hash_mismatch" };
+  }
+
+  let rekorPublicKeyPem: string;
+  try {
+    const res = await fetch(`${REKOR_BASE_URL}/api/v1/log/publicKey`);
+    if (!res.ok) return { ok: false, reason: `rekor_publickey_fetch_failed_${res.status}` };
+    rekorPublicKeyPem = await res.text();
+  } catch (error) {
+    return { ok: false, reason: `rekor_publickey_fetch_error_${error instanceof Error ? error.message : String(error)}` };
+  }
+  const rekorKeyObj = createPublicKey(rekorPublicKeyPem);
+  const computedLogId = createHash("sha256").update(rekorKeyObj.export({ type: "spki", format: "der" })).digest("hex");
+  if (computedLogId !== entry.log_id) return { ok: false, reason: "rekor_log_id_mismatch_current_key" };
+
+  const tlogEntry: SigstoreTransparencyLogEntryShape = {
+    logIndex: String(entry.log_index),
+    logId: { keyId: Buffer.from(entry.log_id, "hex") },
+    kindVersion: { kind: body.kind, version: body.apiVersion },
+    integratedTime: String(entry.integrated_time),
+    inclusionProof: {
+      logIndex: String(entry.inclusion_proof.log_index),
+      rootHash: Buffer.from(entry.inclusion_proof.root_hash, "hex"),
+      treeSize: String(entry.inclusion_proof.tree_size),
+      hashes: entry.inclusion_proof.hashes.map((h) => Buffer.from(h, "hex")),
+      checkpoint: { envelope: entry.inclusion_proof.checkpoint },
+    },
+    canonicalizedBody: Buffer.from(entry.body, "base64"),
+  };
+  const tlogAuthority: SigstoreTLogAuthorityShape = {
+    logID: Buffer.from(entry.log_id, "hex"), baseURL: REKOR_BASE_URL, publicKey: rekorKeyObj,
+    validFor: { start: new Date(0), end: new Date(Date.now() + 1000 * 3600 * 24 * 365 * 50) },
+  };
+  try {
+    const tlog = await import("@sigstore/verify/dist/tlog/index.js") as { verifyTLogInclusion: (e: unknown, a: unknown[]) => void };
+    tlog.verifyTLogInclusion(tlogEntry, [tlogAuthority]);
+  } catch (error) {
+    return { ok: false, reason: `rekor_tlog_inclusion_failed_${error instanceof Error ? error.message : String(error)}` };
+  }
+  return { ok: true };
+}
+
+// 06.11.2026 (SaSame/DM challenge: revoked_at is self-attested -- a compromised key can forge/
+// backdate its own revoked_at to devalue evidence it signed itself). Rekor's integrated_time
+// cannot be chosen by the key holder -- as long as a real, inclusion-proof-valid rekor_tlog_entry
+// is present, the maximum of the two times is the earliest point an attacker cannot undercut.
+// Without rekor_tlog_entry, revoked_at remains the only source -- pre-existing behavior, NOT
+// hardened against backdating, not a blocker (every revocation predating this hardening has no
+// rekor_tlog_entry).
+export function computeEffectiveRevokedAt(record: RevocationRecordV1): string | null {
+  if (!record.revoked_at) return null;
+  const selfAttestedMs = Date.parse(record.revoked_at);
+  if (Number.isNaN(selfAttestedMs)) return null;
+  if (!record.rekor_tlog_entry) return record.revoked_at;
+  const rekorMs = record.rekor_tlog_entry.integrated_time * 1000;
+  return new Date(Math.max(selfAttestedMs, rekorMs)).toISOString();
+}
+
+// 06.11.2026: uses computeEffectiveRevokedAt() above, only at the spot where a key is already
+// looked up as "trusted" via crossCheckTrustAnchor() consensus (main()/runManifestSubcommand()
+// below) -- no new check site for keys explicitly pinned via CLI argument. evidenceTimeIso comes
+// from bundle.rfc3161_timestamp?.gen_time (the only timestamp in the bundle the signer cannot
+// choose, see verifyRfc3161Binding()) -- if absent (still the majority of bundles today), a time
+// comparison stays impossible and the check does NOT additionally fail (honestly "unprovable", no
+// new behavior for existing bundles without a timestamp).
+export async function checkSignerNotRevokedAfterEvidenceTime(
+  consensus: TrustAnchorConsensus,
+  evidenceTimeIso: string | null,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!consensus.agreed_key_id) return { ok: true };
+  const record = consensus.revocations.find((r) => r.key_id === consensus.agreed_key_id);
+  if (!record) return { ok: true };
+  if (record.rekor_tlog_entry) {
+    const staple = await verifyRekorStapling(record);
+    if (!staple.ok) return { ok: false, reason: `revocation_proof_invalid_${staple.reason}` };
+  }
+  const effective = computeEffectiveRevokedAt(record);
+  if (!effective || !evidenceTimeIso) return { ok: true };
+  const evidenceMs = Date.parse(evidenceTimeIso);
+  if (Number.isNaN(evidenceMs)) return { ok: true };
+  if (evidenceMs > Date.parse(effective)) {
+    return { ok: false, reason: "signer_key_revoked_before_evidence_time" };
+  }
+  return { ok: true };
 }
 
 // 05.09.2026 (Bauanleitung 1.4, Rest): der Kern -- ci_result als Pflicht-Gate -- war bereits
@@ -2451,6 +2637,12 @@ async function runManifestSubcommand(): Promise<void> {
     const consensus = await crossCheckTrustAnchor("evidence_package");
     printConsensus("evidence_package", consensus);
     if (consensus.agreed_public_key_pem) trustedPublicKey = consensus.agreed_public_key_pem;
+    const revocationCheck = await checkSignerNotRevokedAfterEvidenceTime(consensus, bundle.rfc3161_timestamp?.gen_time ?? null);
+    if (!revocationCheck.ok) {
+      console.error(`Manifest verification failed: ${revocationCheck.reason}`);
+      process.exitCode = 2;
+      return;
+    }
   }
   // Anders als der bestehende Bundle-Pfad weiter unten (der approval_attestation_required
   // voraussetzt): verifyVerifierBindingManifestV1() prueft approval_attestation IMMER unabhaengig
@@ -2461,6 +2653,12 @@ async function runManifestSubcommand(): Promise<void> {
     const consensus = await crossCheckTrustAnchor("human_approval");
     printConsensus("human_approval", consensus);
     if (consensus.agreed_public_key_pem) trustedApprovalPublicKey = consensus.agreed_public_key_pem;
+    const revocationCheck = await checkSignerNotRevokedAfterEvidenceTime(consensus, bundle.rfc3161_timestamp?.gen_time ?? null);
+    if (!revocationCheck.ok) {
+      console.error(`Manifest verification failed: ${revocationCheck.reason}`);
+      process.exitCode = 2;
+      return;
+    }
   }
   if (!trustedPublicKey) {
     console.error("Manifest verification failed: trusted evidence key unavailable");
@@ -2576,11 +2774,23 @@ async function main() {
     const consensus = await crossCheckTrustAnchor("evidence_package");
     printConsensus("evidence_package", consensus);
     if (consensus.agreed_public_key_pem) trustedPublicKey = consensus.agreed_public_key_pem;
+    const revocationCheck = await checkSignerNotRevokedAfterEvidenceTime(consensus, bundle.rfc3161_timestamp?.gen_time ?? null);
+    if (!revocationCheck.ok) {
+      console.error(`Bundle verification failed: ${revocationCheck.reason}`);
+      process.exitCode = 2;
+      return;
+    }
   }
   if (!trustedApprovalPublicKey && bundle.approval_attestation_required && bundle.approval_attestation) {
     const consensus = await crossCheckTrustAnchor("human_approval");
     printConsensus("human_approval", consensus);
     if (consensus.agreed_public_key_pem) trustedApprovalPublicKey = consensus.agreed_public_key_pem;
+    const revocationCheck = await checkSignerNotRevokedAfterEvidenceTime(consensus, bundle.rfc3161_timestamp?.gen_time ?? null);
+    if (!revocationCheck.ok) {
+      console.error(`Bundle verification failed: ${revocationCheck.reason}`);
+      process.exitCode = 2;
+      return;
+    }
   }
 
   if (verdictArtifact) {

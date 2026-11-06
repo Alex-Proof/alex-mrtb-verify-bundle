@@ -61,9 +61,34 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-06 (Sicherheitsfund ueber die oeffentliche Evidence-Forgery-
-Challenge: Trust-Anchor-Pin griff nicht im Legacy-Pfad ohne/mit fremdem `schema_version`, gefixt)
+**Zuletzt bearbeitet:** 2026-11-06 (Rekor-Stapling fuer die Trust-Anchor-Registry nachgezogen --
+SaSame/DM: Zurueckdatierungs-Haertung + Checkpoint-Pruefung statt Registry-Walk)
 **Von:** Alex-Proof
+
+Externe Rueckmeldung (privates Bluesky-DM): `revoked_at` ist self-attestiert -- ein
+kompromittierter Schluessel kann sein eigenes `revoked_at` faelschen/zurueckdatieren, um Evidence
+zu entwerten, die er selbst signiert hat. Rekors `integratedTime` kann der Schluesselhalter NICHT
+waehlen. Umgesetzt: neue
+`computeEffectiveRevokedAt()` nimmt bei vorhandenem `rekor_tlog_entry` das Maximum aus
+`Date.parse(revoked_at)` und `integrated_time` (Sekunden -> ms). Fuer das offene Wiring: kein
+Registry-Walk, um zu pruefen OB eine Revocation existiert (Abwesenheit kann ein Live-Fetch nicht
+beweisen) -- `verifyRekorStapling()` (bereits vorher in diesem Repo gebaut, siehe Eintrag weiter
+unten) prueft stattdessen den EINEN im Record referenzierten Log-Eintrag per Merkle-Inclusion-
+Proof + Checkpoint-Signatur gegen Rekors eigenen, live abgefragten Log-Pubkey -- kein Vollvertrauen
+in eine blosse "ist enthalten"-Antwort. Neue `checkSignerNotRevokedAfterEvidenceTime()` verdrahtet
+beides an den 4 Stellen in `verify.ts`, an denen ein Schluessel bereits per `crossCheckTrustAnchor()`-
+Konsens als trusted gilt (`main()` x2, `runManifestSubcommand()` x2); `crossCheckTrustAnchor()`
+liest `trust_anchor_registry.revocations[]` jetzt aus allen Kanaelen. Vergleichszeit ist
+`bundle.rfc3161_timestamp?.gen_time` -- der einzige Zeitstempel im Bundle, den der Signer nicht
+waehlen kann; fehlt er (die Mehrheit der Bundles heute), bleibt der Zeitvergleich ehrlich
+unmoeglich, kein neues Verhalten fuer unzeitgestempelte Bestandsbundles. `verify.py` bekommt
+bewusst KEIN Pendant hierzu (identische Asymmetrie wie im privaten `_verifier.py`-Paket: kein
+RFC-6962-Nachbau in Python). 10 neue Tests in `test/rekor-stapling.test.mjs` (4 echte Live-
+Rundlaeufe gegen `rekor.sigstore.dev`, 6 neue fuer die beiden neuen Funktionen, inkl. eines
+gefaelschten/nicht-pruefbaren `rekor_tlog_entry` -> Ablehnung, nie fail-open). 75/75 Tests gruen.
+
+**Zuvor, ebenfalls 2026-11-06:** Sicherheitsfund ueber die oeffentliche Evidence-Forgery-
+Challenge: Trust-Anchor-Pin griff nicht im Legacy-Pfad ohne/mit fremdem `schema_version`, gefixt.
 
 Echter Fund ueber die oeffentliche Evidence-Forgery-Challenge (`challenge.alexproof.de`), nicht
 von einem externen Melder: `verifyBundleObject()` pruefte den uebergebenen `trustedPublicKey`
