@@ -281,6 +281,147 @@ def _event_payload(raw: str, prefix: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+# 06.11.2026 (externe Kritik, GitHub-Issue #9): Parity zu den 7 capability-Konstanten und
+# Event-Prefixes in verify.ts (Zeilen 1252-1274), fuer deriveOutcomeFromTrace()/derive_outcome_from_trace()
+# unten -- bisher in verify.py an keiner Stelle vorhanden, weil der alte Top-Gate in verify() jedes
+# Nicht-V2-Schema-Bundle schon vorher ablehnte.
+PROVENANCE_CAPABILITY = "memory.provenance.attached@1.0"
+DELETE_ENFORCED_CAPABILITY = "memory.delete.enforced@1.0"
+TENANT_ISOLATION_CAPABILITY = "memory.tenant.isolation@1.0"
+WRITE_INTEGRITY_CAPABILITY = "memory.write.integrity@1.0"
+TAMPER_EVIDENT_CAPABILITY = "memory.audit.tamper_evident@1.0"
+RECOVERY_VERIFIED_CAPABILITY = "memory.recovery.verified@1.0"
+DEVTASK_EXECUTION_CAPABILITY = "devtask.execution@1.0"
+CORE_SELF_TEST_CAPABILITY = "alex.core.self_test@1.0"
+MEMORY_WRITE_EVENT_PREFIX = "memory_write:"
+MEMORY_STATE_READ_EVENT_PREFIX = "memory_state_read:"
+TENANT_ACCESS_PROBE_EVENT_PREFIX = "tenant_access_probe:"
+MEMORY_CONTENT_CHANGE_EVENT_PREFIX = "memory_content_change:"
+AUDIT_CHAIN_CHECK_EVENT_PREFIX = "audit_chain_check:"
+MEMORY_RECOVERY_EVENT_PREFIX = "memory_recovery:"
+
+
+def _devtask_base_gate_blocked(events: list[str], task_id: Any, attempt_number: Any) -> bool:
+    """Scope-Violation / unabhaengige negative_claim (strength != policy_derived, result=False) /
+    ungeloeste contradiction -- byte-genau zu demselben Block in deriveOutcomeFromTrace() (verify.ts)
+    UND im bestehenden derive() unten (hier einmal extrahiert, nicht zweimal geschrieben)."""
+    for raw in events:
+        if raw.startswith("devtask_scope_violation:"):
+            v = _event_payload(raw, "devtask_scope_violation:")
+            if v is not None and v.get("task_id") == task_id and v.get("attempt_number") == attempt_number:
+                return True
+        elif raw.startswith("devtask_negative_claim:"):
+            v = _event_payload(raw, "devtask_negative_claim:")
+            if (v is not None and v.get("task_id") == task_id and v.get("attempt_number") == attempt_number
+                    and v.get("strength") != "policy_derived" and v.get("result") is False):
+                return True
+        elif raw.startswith("devtask_contradiction:"):
+            v = _event_payload(raw, "devtask_contradiction:")
+            if v is not None and v.get("resolved") is False:
+                return True
+    return False
+
+
+def _derive_devtask_base_outcome(events: list[str]) -> str:
+    """Byte-genau zu deriveOutcomeFromTrace(DEVTASK_EXECUTION_CAPABILITY, events) in verify.ts
+    (Zeilen 1731-1783): nur die Basis-Ableitung aus Trace-Events, OHNE controller_evidence. Die
+    controller-abhaengige Erweiterung ist deriveDevTaskV2Outcome() / derive() unten, nur fuer
+    isDevTaskV2Schema()-Bundles."""
+    contract = event(events, "contract")
+    attempt = event(events, "attempt")
+    outcome = event(events, "outcome")
+    if not contract or not attempt or not outcome:
+        return "inconclusive"
+    validation = event(events, "validation")
+    approval = event(events, "approval")
+    task_id, attempt_number = contract.get("task_id"), contract.get("attempt_number")
+    present = [item for item in (contract, attempt, outcome, validation, approval) if item]
+    if any(item.get("task_id") != task_id or item.get("attempt_number") != attempt_number for item in present):
+        return "failed"
+    if outcome.get("outcome") == "COMPLETED" and not approval:
+        return "failed"
+    if outcome.get("outcome") == "COMPLETED" and validation and validation.get("validation_status") not in ("passed", "passed_override"):
+        return "failed"
+    if _devtask_base_gate_blocked(events, task_id, attempt_number):
+        return "failed"
+    return "verified"
+
+
+def derive_outcome_from_trace(capability: str, events: list[str]) -> str:
+    """Python-Spiegel von deriveOutcomeFromTrace() in verify.ts -- die 7 capability-Zweige, die
+    verify() unten fuer Bundles ausserhalb von DEVTASK_V2_SCHEMA_VERSIONS braucht (Issue #9:
+    V1-/memory.*-capability-Bundles, inklusive dem eigenen sample-bundle.json)."""
+    if capability == PROVENANCE_CAPABILITY:
+        writes = [p for raw in events if raw.startswith(MEMORY_WRITE_EVENT_PREFIX)
+                  for p in [_event_payload(raw, MEMORY_WRITE_EVENT_PREFIX)] if p is not None]
+        if not writes:
+            return "inconclusive"
+
+        def _provenance_mismatch(write: dict[str, Any]) -> bool:
+            actual_agent, provenance_agent = write.get("actual_agent_id"), write.get("provenance_agent_id")
+            actual_hash, provenance_hash = write.get("actual_source_hash"), write.get("provenance_source_hash")
+            if not actual_agent or not provenance_agent or not actual_hash or not provenance_hash:
+                return True
+            return actual_agent != provenance_agent or actual_hash != provenance_hash
+
+        return "failed" if any(_provenance_mismatch(w) for w in writes) else "verified"
+
+    if capability == DELETE_ENFORCED_CAPABILITY:
+        reads = [p for raw in events if raw.startswith(MEMORY_STATE_READ_EVENT_PREFIX)
+                 for p in [_event_payload(raw, MEMORY_STATE_READ_EVENT_PREFIX)] if p is not None]
+        after_delete = next((r for r in reads if r.get("phase") == "after_delete" and r.get("source") == "storage_probe"), None)
+        if after_delete is None:
+            return "inconclusive"
+        if after_delete.get("exists"):
+            return "failed"
+        replay_violation = any(r.get("phase") == "after_replay_check" and r.get("source") == "storage_probe" and r.get("exists") for r in reads)
+        return "failed" if replay_violation else "verified"
+
+    if capability == TENANT_ISOLATION_CAPABILITY:
+        probes = [p for raw in events if raw.startswith(TENANT_ACCESS_PROBE_EVENT_PREFIX)
+                  for p in [_event_payload(raw, TENANT_ACCESS_PROBE_EVENT_PREFIX)] if p is not None]
+        if not probes:
+            return "inconclusive"
+        cross_tenant = [p for p in probes if p.get("requesting_tenant") != p.get("target_tenant")]
+        if not cross_tenant:
+            return "inconclusive"
+        leak = any(p.get("allowed") for p in cross_tenant)
+        return "failed" if leak else "verified"
+
+    if capability == WRITE_INTEGRITY_CAPABILITY:
+        changes = [p for raw in events if raw.startswith(MEMORY_CONTENT_CHANGE_EVENT_PREFIX)
+                   for p in [_event_payload(raw, MEMORY_CONTENT_CHANGE_EVENT_PREFIX)] if p is not None]
+        if not changes:
+            return "inconclusive"
+        before = next((c for c in changes if c.get("phase") == "before" and c.get("source") == "content_probe"), None)
+        after = next((c for c in changes if c.get("phase") == "after" and c.get("source") == "content_probe"), None)
+        if before is None or after is None:
+            return "inconclusive"
+        return "failed" if before.get("content_hash") == after.get("content_hash") else "verified"
+
+    if capability == TAMPER_EVIDENT_CAPABILITY:
+        checks = [p for raw in events if raw.startswith(AUDIT_CHAIN_CHECK_EVENT_PREFIX)
+                  for p in [_event_payload(raw, AUDIT_CHAIN_CHECK_EVENT_PREFIX)] if p is not None]
+        if not checks:
+            return "inconclusive"
+        chain_broken = any(c.get("source") == "audit_chain_probe" and not c.get("chain_valid") for c in checks)
+        return "failed" if chain_broken else "verified"
+
+    if capability == RECOVERY_VERIFIED_CAPABILITY:
+        recoveries = [p for raw in events if raw.startswith(MEMORY_RECOVERY_EVENT_PREFIX)
+                      for p in [_event_payload(raw, MEMORY_RECOVERY_EVENT_PREFIX)] if p is not None]
+        if not recoveries:
+            return "inconclusive"
+        bad_restore = any(r.get("source") != "recovery_probe" or not r.get("restored")
+                           or r.get("requested_state_hash") != r.get("recovered_state_hash") for r in recoveries)
+        return "failed" if bad_restore else "verified"
+
+    if capability == DEVTASK_EXECUTION_CAPABILITY:
+        return _derive_devtask_base_outcome(events)
+
+    return "inconclusive"
+
+
 def derive(bundle: dict[str, Any]) -> str:
     events, controller = bundle.get("trace_events"), bundle.get("controller_evidence")
     if not isinstance(events, list) or not all(isinstance(item, str) for item in events) or not isinstance(controller, dict):
@@ -303,21 +444,11 @@ def derive(bundle: dict[str, Any]) -> str:
     # Basis-Gate (deriveOutcomeFromTrace, capability devtask): scope_violation, unabhaengige
     # negative_claim (result=False, strength != "policy_derived") und ungeloeste contradiction
     # blockieren "verified" -> "failed". Byte-genau zu deriveOutcomeFromTrace() in verify.ts.
+    # 06.11.2026 (Issue #9): in _devtask_base_gate_blocked() extrahiert, geteilt mit
+    # _derive_devtask_base_outcome() (derselbe Block, nicht zweimal geschrieben).
     tid, anum = contract.get("task_id"), contract.get("attempt_number")
-    for raw in events:
-        if raw.startswith("devtask_scope_violation:"):
-            v = _event_payload(raw, "devtask_scope_violation:")
-            if v is not None and v.get("task_id") == tid and v.get("attempt_number") == anum:
-                return "failed"
-        elif raw.startswith("devtask_negative_claim:"):
-            v = _event_payload(raw, "devtask_negative_claim:")
-            if (v is not None and v.get("task_id") == tid and v.get("attempt_number") == anum
-                    and v.get("strength") != "policy_derived" and v.get("result") is False):
-                return "failed"
-        elif raw.startswith("devtask_contradiction:"):
-            v = _event_payload(raw, "devtask_contradiction:")
-            if v is not None and v.get("resolved") is False:
-                return "failed"
+    if _devtask_base_gate_blocked(events, tid, anum):
+        return "failed"
     context, diff, approval = values["context"], values["diff"], values["approval"]
     if not context or controller.get("execution_reference") != context.get("execution_reference"):
         return "failed"
@@ -694,21 +825,39 @@ def build_customer_summary_de(input_: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -> tuple[bool, str]:
+def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key: str | None = None) -> tuple[bool, str]:
     # 06.11.2026 (externe Kritik, GitHub-Issue #10): receipt_chain_entry (ADR 06 / vNext 4.12)
     # haengt als AEUSSERSTE Schicht an und war nie Teil der signierten Nutzlast -- fehlte hier
     # bisher komplett, identisch zu withoutReceiptChainEntry() in verify.ts. Ohne diesen Strip
     # lehnte dieser Verifier jedes sonst gueltige Bundle mit receipt_chain_entry ab
     # (invalid_signature, weil receipt_chain_entry in den gehashten Payload mit einfloss).
     bundle = {key: value for key, value in bundle.items() if key != "receipt_chain_entry"}
-    if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or bundle.get("capability") != "devtask.execution@1.0":
-        return False, "unsupported_schema_or_capability"
-    # 2.3 ist "2.2 + Pflicht-Gate": erbt dieselbe Spec-Validierung/Kanonisierung wie 2.2, keine
-    # eigene, dritte Nutzlastform (Parity zu verifyBundleObject() in verify.ts).
-    if bundle.get("schema_version") in ("evidence-package@2.2", "evidence-package@2.3"):
-        spec_error = validate_spec_v1(bundle)
-        if spec_error:
-            return False, spec_error
+    schema_version = bundle.get("schema_version")
+    is_v2 = schema_version in DEVTASK_V2_SCHEMA_VERSIONS
+
+    # 06.11.2026 (externe Kritik, GitHub-Issue #9): verifyBundleObject() in verify.ts verifiziert bei
+    # NICHT-V2-Schema-Bundles (V1-/memory.*-capability-Bundles, inklusive dem eigenen
+    # sample-bundle.json) weiterhin den Legacy-Signaturpfad, die Hash-Kette und den
+    # Trace-Outcome-Abgleich (deriveOutcomeFromTrace(), siehe unten) -- dieser Verifier lehnte
+    # bisher JEDE solche Klasse Evidence schon hier ab ("unsupported_schema_or_capability"), bevor
+    # diese Pruefungen je liefen. "unsupported_schema_version" nur noch fuer ein fremdes/falsches
+    # evidence-package@-Schema, identisch zu verifyBundleObject(): `bundle.schema_version?.
+    # startsWith("evidence-package@") && !isDevTaskV2Schema(...)`. trusted_key ist jetzt optional
+    # (Parity zum optionalen trustedPublicKey-Parameter von verifyBundleObject()); ein Aufruf ohne
+    # trusted_key bleibt fuer Nicht-V2-Bundles unveraendert (echte Legacy-Bundles ohne jeden
+    # Pinning-Anspruch).
+    if not is_v2:
+        if isinstance(schema_version, str) and schema_version.startswith("evidence-package@"):
+            return False, "unsupported_schema_version"
+    else:
+        if bundle.get("capability") != "devtask.execution@1.0":
+            return False, "unsupported_schema_or_capability"
+        # 2.3 ist "2.2 + Pflicht-Gate": erbt dieselbe Spec-Validierung/Kanonisierung wie 2.2, keine
+        # eigene, dritte Nutzlastform (Parity zu verifyBundleObject() in verify.ts).
+        if schema_version in ("evidence-package@2.2", "evidence-package@2.3"):
+            spec_error = validate_spec_v1(bundle)
+            if spec_error:
+                return False, spec_error
     claim_decomposition = bundle.get("claim_decomposition")
     if claim_decomposition is not None:
         decomposition_error = validate_claim_decomposition(claim_decomposition, claim_decomposition.get("original_output", ""), True)
@@ -717,16 +866,25 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
     if shutil.which("openssl") is None:
         return False, "openssl_unavailable"
     embedded = bundle.get("public_key")
-    if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
+    if is_v2:
+        if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
+            return False, "untrusted_signer"
+    elif trusted_key is not None and embedded != trusted_key:
+        # 06.11.2026 (Issue #9, Parity zu verifyBundleObject(), identisches Muster wie der
+        # Issue-#2/#3-Fix): Legacy-Signaturpfad -- nur gepinnt, wenn trusted_key ueberhaupt
+        # uebergeben wurde. Ein Aufruf OHNE trusted_key (None) bleibt unveraendert.
         return False, "untrusted_signer"
+    # Signaturpruefung laeuft immer gegen den EINGEBETTETEN public_key (nicht trusted_key direkt):
+    # fuer is_v2 sind beide ohnehin identisch (gerade erst erzwungen), fuer den ungepinnten
+    # Legacy-Pfad ist trusted_key None und nur embedded ist ueberhaupt ein gueltiger Schluessel.
     payload = {key: value for key, value in bundle.items() if key not in ("signature", "public_key", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")}
-    signed_payload = canonical_evidence_bytes(payload) if bundle.get("schema_version") in ("evidence-package@2.2", "evidence-package@2.3") else compact(payload)
-    if not openssl_verify(trusted_key, signed_payload, str(bundle.get("signature", ""))):
+    signed_payload = canonical_evidence_bytes(payload) if schema_version in ("evidence-package@2.2", "evidence-package@2.3") else compact(payload)
+    if not openssl_verify(embedded, signed_payload, str(bundle.get("signature", ""))):
         return False, "invalid_signature"
     # 28.09.2026 (Iman/EMILIA-Feedback): fuer evidence-package@2.3 ist epistemic_gate PFLICHT, nicht
     # nur additiv-optional wie fuer 2.0-2.2 (Parity zu verifyBundleObject() in verify.ts). Laeuft im
     # blossen Bundle-Check, nicht nur im Verdict-Artefakt-Pfad.
-    if bundle.get("schema_version") in EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS:
+    if schema_version in EPISTEMIC_GATE_REQUIRED_SCHEMA_VERSIONS:
         gate_ok, gate_reason = verify_epistemic_gate_binding(bundle, trusted_key)
         if not gate_ok:
             return False, f"epistemic_gate_{gate_reason or 'invalid'}"
@@ -755,14 +913,21 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
                           and c.get("attempt_number") == controller_evidence.get("attempt_number")), None)
         if not contract or sha256_bytes(compact(snapshot)) != contract.get("contract_hash"):
             return False, "contract_snapshot_hash_mismatch"
-    derived = derive(bundle)
-    if bundle.get("outcome") != derived:
-        return False, f"trace_outcome_mismatch:declared={bundle.get('outcome')}:derived={derived}"
-    if derived != "verified":
-        return False, f"non_verified_outcome:{derived}"
+    # 06.11.2026 (Issue #9): die devtask-v2-Ableitung (derive(), controller_evidence-abhaengig) darf
+    # nur fuer isDevTaskV2Schema()-Bundles laufen -- fuer Nicht-V2-Bundles (memory.*/V1) liefert
+    # derive() sonst faelschlich "inconclusive" (kein controller_evidence vorhanden), was ein
+    # korrekt "verified" deklariertes memory.*-Bundle faelschlich als trace_outcome_mismatch
+    # ablehnen wuerde. Parity zu `isDevTaskV2Schema(bundle.schema_version) && bundle.controller_evidence`
+    # in verifyBundleObject(). Der Nicht-V2-Trace-Outcome-Abgleich folgt weiter unten
+    # (deriveOutcomeFromTrace()-Dispatch, inkl. derselben devtask.execution@1.0-Basis-Ableitung).
+    if is_v2:
+        derived = derive(bundle)
+        if bundle.get("outcome") != derived:
+            return False, f"trace_outcome_mismatch:declared={bundle.get('outcome')}:derived={derived}"
+        if derived != "verified":
+            return False, f"non_verified_outcome:{derived}"
     # 06.11.2026 (externe Kritik, GitHub-Issue #8): Byte-genau zu verifyBundleObject() in verify.ts --
     # fuer evidence-package@2.1 IMMER, fuer 2.2/2.3 nur wenn customer_evidence im Bundle gesetzt ist.
-    schema_version = bundle.get("schema_version")
     if schema_version == "evidence-package@2.1" or (
         schema_version in ("evidence-package@2.2", "evidence-package@2.3") and "customer_evidence" in bundle
     ):
@@ -774,6 +939,25 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
         customer_approval = customer_evidence.get("approval") if isinstance(customer_evidence.get("approval"), dict) else {}
         if isinstance(controller_evidence, dict) and customer_approval.get("approval_reference") != controller_evidence.get("approval_reference"):
             return False, "customer_approval_reference_mismatch"
+    # 06.11.2026 (Issue #9): Parity zu verifyBundleObject() in verify.ts (Zeilen 2051-2081) -- ausserhalb
+    # von DEVTASK_V2_SCHEMA_VERSIONS muss eine der 7 bekannten capabilities den Trace-Outcome-Abgleich
+    # per deriveOutcomeFromTrace() durchlaufen; eine fremde capability wird nur abgelehnt, wenn
+    # trusted_key ueberhaupt gepinnt wurde (identisches Muster zum Legacy-Signaturpfad oben,
+    # Issue-#13-Fix). alex.core.self_test@1.0 bleibt wie in TS ausgenommen (reiner
+    # Signatur-Rundlauf-Probe ohne capability-spezifisches trace_events-Format).
+    if not is_v2 and bundle.get("capability") != CORE_SELF_TEST_CAPABILITY:
+        capability = bundle.get("capability")
+        known_capability = capability in (
+            PROVENANCE_CAPABILITY, DELETE_ENFORCED_CAPABILITY, TENANT_ISOLATION_CAPABILITY,
+            WRITE_INTEGRITY_CAPABILITY, TAMPER_EVIDENT_CAPABILITY, RECOVERY_VERIFIED_CAPABILITY,
+            DEVTASK_EXECUTION_CAPABILITY,
+        )
+        if not known_capability and trusted_key is not None:
+            return False, f"unsupported_capability:{capability}"
+        if known_capability:
+            derived_outcome = derive_outcome_from_trace(capability, events)
+            if bundle.get("outcome") != derived_outcome:
+                return False, f"trace_outcome_mismatch:declared={bundle.get('outcome')}:derived={derived_outcome}"
     attestation = bundle.get("approval_attestation")
     if _js_truthy(bundle.get("approval_attestation_required")):
         if not approval_key:
@@ -790,6 +974,12 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
         without_approval = {key: value for key, value in bundle.items() if key not in ("approval_attestation", "observer_receipt", "epistemic_gate")}
         if attestation.get("bundle_sha256") != sha256_bytes(compact(without_approval)):
             return False, "approval_scope_mismatch"
+    # 06.11.2026 (Issue #9): fuer is_v2 ist dies bereits weiter oben erzwungen (frueher Return bei
+    # Nicht-"verified"); fuer den Legacy-/memory.*-Pfad ist dies der einzige Ort, der outcome
+    # unbedingt gegen "verified" prueft -- Parity zu `if (bundle.outcome !== "verified")` am Ende
+    # von verifyBundleObject() in verify.ts.
+    if bundle.get("outcome") != "verified":
+        return False, f"non_verified_outcome:{bundle.get('outcome')}"
     return True, "verified"
 
 
@@ -1280,18 +1470,29 @@ def main() -> int:
         return _run_manifest_subcommand(sys.argv[2:])
     parser = argparse.ArgumentParser(description="Independent Python verifier for ALEX dev-task Evidence Packages")
     parser.add_argument("bundle")
-    parser.add_argument("trusted_key")
+    # 06.11.2026 (Issue #9, Parity zu main() in verify.ts: `process.argv[3] ? readFileSync(...) :
+    # undefined`): trusted_key ist jetzt optional -- `python verify.py bundle.json` allein muss ein
+    # V1-/memory.*-Bundle ohne Trust-Anchor-Pinning genauso verifizieren wie `node dist/verify.js
+    # bundle.json`. Die 5 Hilfsartefakt-Schemas unten (agent-passport-card etc.) verlangen trusted_key
+    # weiterhin explizit -- deren eigene Verifier haben nie einen ungepinnten Modus gehabt.
+    parser.add_argument("trusted_key", nargs="?")
     parser.add_argument("approval_key", nargs="?")
     parser.add_argument("--policy", help="Pfad zu einer Proof-Policy-Datei (spec/policies/*.json) -- optionales Gate nach erfolgreicher Verifikation.")
     args = parser.parse_args()
     try:
         with open(args.bundle, encoding="utf-8") as handle:
             bundle = json.load(handle)
-        with open(args.trusted_key, encoding="utf-8") as handle:
-            trusted = handle.read()
+        trusted = None
+        if args.trusted_key:
+            with open(args.trusted_key, encoding="utf-8") as handle:
+                trusted = handle.read()
         # CLI-Dispatch nach schema_version (Spiegel zu main() in verify.ts): Hilfsartefakte laufen
         # ueber ihren eigenen Verifier, Evidence-Bundles fallen in den verify()-Pfad unten.
         schema = bundle.get("schema_version")
+        if schema in ("agent-passport-card@1.0", "agent-passport-history@1.0", "challenge-response@1.0",
+                      "php-exposure-evidence@1.0", "verdict-artifact@1.0") and trusted is None:
+            print(f"ERROR: trusted_key is required to verify schema {schema}", file=sys.stderr)
+            return 2
         if schema == "agent-passport-card@1.0":
             ok, reason = verify_agent_passport_card_v1(bundle, trusted)
             if ok:
