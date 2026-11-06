@@ -1,0 +1,59 @@
+{
+  "schema_version": "evidence-package@2.0",
+  "bundle_id": "isolation_test_contract_snapshot",
+  "capability": "devtask.execution@1.0",
+  "run_id": "task-iso-1:1",
+  "claim_ladder": "L2",
+  "executed_at": "2026-11-06T00:00:00.000Z",
+  "trace_events": [
+    "devtask_contract_bound:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"contract_hash\":\"12d7731d7374a426304f6a301c253ea2a3ef81467539d8b818fae1fe56789091\",\"contract_schema_version\":\"work-contract@1.0\",\"risk_class\":\"R0\"}",
+    "devtask_attempt_started:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"started_at\":\"2026-11-06T00:00:00.000Z\"}",
+    "devtask_execution_context:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"sandbox_reference\":null,\"execution_reference\":\"exec-ref-1\"}",
+    "devtask_validation:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"validation_status\":\"passed\",\"validation_reference\":\"val-ref-1\"}",
+    "devtask_diff_evidence:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"diff_stat_sha256\":\"stat-40460da8c882cdc791836fba76009870f960a151287798f1df8af5e963398f84\",\"diff_full_sha256\":\"d7d6ae51110cad4444f76b859059481fdd600f617f0ec61c791ff4a28bdcd3ee\",\"scope\":\"diff_stat_and_full\"}",
+    "devtask_outcome:{\"task_id\":\"task-iso-1\",\"attempt_number\":1,\"outcome\":\"ABORTED\"}"
+  ],
+  "trace_hash_chain": [
+    "acc0cd54ecc6d18e82a5d351c18db928cbeccd61114c1651a191c84576822eff",
+    "6d3dc8b5550d9174e2763d20213abb99515339a3cc1193dab6a5eaee155b28c4",
+    "40ec9f936c2131120dc1a72593b83be2c291bd9cc7f4a2b3ed0158cb444ef91a",
+    "71ee968b1b6f797bfabb69c30eb18159a9e082698061732736fc363a028999b2",
+    "1f37646819e939614e2e4ce2ccb79e4c7b90957e325120a8af68da2c6c01a932",
+    "13c18dacba16d87ba6e42a9115ef4bb8d1f5d33a14abe01d0d7b9f6cd1a2624c"
+  ],
+  "outcome": "verified",
+  "signer_key_id": "ed25519:1222234e1410ce64ae57302528af4ed361e3d9e90c65c9f81d4c4251c63afc05",
+  "controller_evidence": {
+    "producer": "privileged_controller",
+    "task_id": "task-iso-1",
+    "attempt_number": 1,
+    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result_reference": null,
+    "diff_stat_sha256": "stat-40460da8c882cdc791836fba76009870f960a151287798f1df8af5e963398f84",
+    "diff_full": "diff --git a/x b/x\n+ok\n",
+    "diff_full_sha256": "d7d6ae51110cad4444f76b859059481fdd600f617f0ec61c791ff4a28bdcd3ee",
+    "execution_reference": "exec-ref-1",
+    "validation_reference": "val-ref-1",
+    "approval_reference": null,
+    "sandbox_reference": null,
+    "sandbox_attestation": null,
+    "agent_run_id": null,
+    "contract_snapshot": {
+      "title": "Manipulierter Vertrag (weicht vom devtask_contract_bound-Hash ab)",
+      "risk_class": "R0",
+      "protect_existing_tests": false
+    }
+  },
+  "required_evidence": [
+    "contract",
+    "attempt",
+    "execution_context",
+    "validation",
+    "outcome",
+    "base_commit",
+    "diff_full"
+  ],
+  "approval_attestation_required": false,
+  "signature": "KsNc6MG2Nwj0ImY5H3DKezgJWCpZPigHEtyo/oMQz/jvOkgsQBdaF+MGbwmiQssiUr+x5wh/ntFriRwCIDzkCQ==",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApdTq1D85GnK9H1vmVevJO4SsHGwG2DrP/tf/0LqkhMY=\n-----END PUBLIC KEY-----\n"
+}

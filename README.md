@@ -61,9 +61,36 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-06 (Rekor-Stapling fuer die Trust-Anchor-Registry nachgezogen --
-SaSame/DM: Zurueckdatierungs-Haertung + Checkpoint-Pruefung statt Registry-Walk)
+**Zuletzt bearbeitet:** 2026-11-06 (Issues #5, #6, #8, #12 gefixt -- RFC3161-Token-Replay,
+Trust-Anchor-key_id/PEM-Luecke, Python-Parity fuer contract_snapshot und customer_summary)
 **Von:** Alex-Proof
+
+Externe Kritik (GitHub-Issues #5/#6/#8/#12 in diesem Repo, Sparkz400/Nico Schuermann). Vier reale
+Luecken, alle direkt am Code gegengeprueft, keine Rueckmeldung des Melders zu den Fixes bisher:
+
+- **#12** `verifyRfc3161Binding()` verglich nur das selbst-deklarierte Feld `timestamped_sha256`
+  gegen den Bundle-Hash, nie gegen den kryptografisch im Token signierten Hash
+  (`TSTInfo.messageImprint.hashedMessage`). Ein echter, gueltig signierter Token fuer Hash A liess
+  sich an ein fremdes Bundle mit Hash B haengen, solange `timestamped_sha256` auf B gesetzt wurde.
+  `extractTokenMessageHashHex()` parst jetzt `TSTInfo` und bindet den Hash kryptografisch.
+  `verify.py` war nicht betroffen -- `openssl ts -verify -digest` erzwingt die Bindung dort schon
+  als Seiteneffekt.
+- **#5** `crossCheckTrustAnchor()` zaehlte `key_id`-Strings pro Kanal und nahm den PEM des ersten
+  Treffers, ohne je zu pruefen, ob ein Kanal ueberhaupt den passenden PEM zur behaupteten `key_id`
+  liefert. Jeder Kanal mit `key_id`/PEM-Fehlpaarung wird jetzt vor der Zaehlung verworfen
+  (`key_id_pem_mismatch`).
+- **#6** `verify.py` prueft jetzt `sha256(compact(contract_snapshot))` gegen den `contract_hash`
+  aus dem passenden `devtask_contract_bound`-Trace-Event -- Parity zu `verifyBundleObject()` in
+  `verify.ts`.
+- **#8** `build_customer_summary_de()` portiert `buildCustomerSummaryDe()` 1:1 nach Python;
+  `verify()` vergleicht `customer_evidence.customer_summary` exakt und bindet
+  `approval_reference`.
+
+Neue Regressionstests: `test/rfc3161-token-binding.test.mjs`, `test/trust-anchor-consensus.test.mjs`,
+`test/python-parity-gaps.test.mjs`. 81/81 Tests gruen.
+
+**Zuvor, ebenfalls 2026-11-06:** Rekor-Stapling fuer die Trust-Anchor-Registry nachgezogen --
+SaSame/DM: Zurueckdatierungs-Haertung + Checkpoint-Pruefung statt Registry-Walk.
 
 Externe Rueckmeldung (privates Bluesky-DM): `revoked_at` ist self-attestiert -- ein
 kompromittierter Schluessel kann sein eigenes `revoked_at` faelschen/zurueckdatieren, um Evidence

@@ -588,6 +588,75 @@ def claim_evidence_ref_assessments(bundle: dict[str, Any]) -> list[dict[str, Any
         assessments.append({"claim": claim.get("claim"), "supported": True, "required": required})
     return assessments
 
+# 06.11.2026 (externe Kritik, GitHub-Issue #8): Byte-genau zu buildCustomerSummaryDe() in verify.ts.
+# Baut deterministisch einen deutschen Text aus customer_evidence, den verify() unten exakt gegen
+# customer_evidence.customer_summary vergleicht -- dieser Verifier validierte customer_summary bisher
+# ueberhaupt nicht.
+def build_customer_summary_de(input_: dict[str, Any]) -> str:
+    brief = input_.get("brief") or {}
+    cost_partial = input_.get("cost_partial") or {}
+    denied = input_.get("denied") or []
+    approval = input_.get("approval") or {}
+    lines: list[str] = [brief.get("title"), "", "Auftrag:", brief.get("raw_text"), "", "Kosten:"]
+    if cost_partial.get("cost_usd_tracked") and cost_partial.get("cost_usd") is not None:
+        parts = [f"${cost_partial['cost_usd']:.2f}"]
+        if cost_partial.get("turns_used") is not None:
+            parts.append(f"{cost_partial['turns_used']} Turns")
+        if cost_partial.get("duration_seconds") is not None:
+            seconds = cost_partial["duration_seconds"]
+            m, s = int(seconds // 60), int(seconds % 60)
+            parts.append(f"{m}m {s}s")
+        lines.append(", ".join(parts))
+    else:
+        lines.append(f"Kosten nicht erfasst (externe CLI-Engine `{cost_partial.get('assigned_engine')}`, kein Kostentracking für diesen Pfad).")
+    lines.append("Es werden ausschließlich Aggregatkosten erfasst, keine Tokenzahlen.")
+    lines.append("")
+    lines.append("Freigabe:")
+    if approval.get("actor_id") is None:
+        lines.append("Keine Freigabe protokolliert.")
+    elif approval.get("proven"):
+        lines.append(f"Bewiesen freigegeben über Kanal `{approval.get('channel')}`.")
+    else:
+        lines.append(f"Freigegeben über Kanal `{approval.get('channel')}`, Identität nicht unabhängig bewiesen.")
+    if approval.get("confirmed_by") is not None:
+        lines.append(f"Bestätigt von: {approval['confirmed_by']}")
+    if approval.get("confirmed_at") is not None:
+        lines.append(f"Bestätigt am: {approval['confirmed_at']}")
+    lines.append("")
+    lines.append("Abgelehnte Aktionen:")
+    if len(denied) == 0:
+        lines.append("Keine abgelehnten Aktionen in diesem Lauf.")
+    else:
+        for d in sorted(denied, key=lambda item: item.get("path", "")):
+            lines.append(f"- {d.get('path')} ({d.get('reason')})")
+    if "open_risks" in input_:
+        open_risks = input_.get("open_risks") or []
+        lines.append("")
+        lines.append("Offene Risiken:")
+        if len(open_risks) == 0:
+            lines.append("Keine bekannten offenen Risiken erfasst.")
+        else:
+            for r in sorted(open_risks, key=lambda item: item.get("code", "")):
+                lines.append(f"- {r.get('description')}")
+    if "acceptance_assertions" in input_:
+        acceptance_assertions = input_.get("acceptance_assertions") or []
+        lines.append("")
+        lines.append("Erfolgskriterien:")
+        checkable = [a for a in acceptance_assertions if a.get("satisfied") is not None]
+        satisfied_count = sum(1 for a in checkable if a.get("satisfied") is True)
+        if len(acceptance_assertions) == 0:
+            lines.append("Keine typisierten Erfolgskriterien fuer diesen Auftrag definiert.")
+        else:
+            lines.append(f"{satisfied_count}/{len(checkable)} maschinell pruefbare Kriterien erfuellt.")
+            for a in checkable:
+                if a.get("satisfied") is False:
+                    lines.append(f"- NICHT erfuellt: {a.get('description')}")
+            freetext = len(acceptance_assertions) - len(checkable)
+            if freetext > 0:
+                lines.append(f"{freetext} weitere(s) Kriterium/Kriterien nicht maschinell pruefbar (Freitext).")
+    return "\n".join(lines)
+
+
 def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -> tuple[bool, str]:
     if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or bundle.get("capability") != "devtask.execution@1.0":
         return False, "unsupported_schema_or_capability"
@@ -628,11 +697,40 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
     unsupported_required = next((claim for claim in claim_evidence_ref_assessments(bundle) if not claim["supported"] and claim["required"]), None)
     if unsupported_required:
         return False, "unsupported_required_claim:" + str(unsupported_required["claim"])
+    # 06.11.2026 (externe Kritik, GitHub-Issue #6): Byte-genau zu verifyBundleObject() in verify.ts --
+    # ein gesetztes controller_evidence.contract_snapshot muss zum contract_hash aus dem passenden
+    # devtask_contract_bound-Trace-Event passen. JS hasht hier mit blossem JSON.stringify() (Einfuege-
+    # Reihenfolge, keine sortierten Keys) statt canonicalEvidenceJson(), deshalb compact(), nicht
+    # canonical_evidence_bytes().
+    controller_evidence = bundle.get("controller_evidence")
+    snapshot = controller_evidence.get("contract_snapshot") if isinstance(controller_evidence, dict) else None
+    if snapshot is not None:
+        contract_prefix = PREFIXES["contract"]
+        contracts = [payload for raw in bundle.get("trace_events", []) if raw.startswith(contract_prefix)
+                     for payload in [_event_payload(raw, contract_prefix)] if payload is not None]
+        contract = next((c for c in contracts if c.get("task_id") == controller_evidence.get("task_id")
+                          and c.get("attempt_number") == controller_evidence.get("attempt_number")), None)
+        if not contract or sha256_bytes(compact(snapshot)) != contract.get("contract_hash"):
+            return False, "contract_snapshot_hash_mismatch"
     derived = derive(bundle)
     if bundle.get("outcome") != derived:
         return False, f"trace_outcome_mismatch:declared={bundle.get('outcome')}:derived={derived}"
     if derived != "verified":
         return False, f"non_verified_outcome:{derived}"
+    # 06.11.2026 (externe Kritik, GitHub-Issue #8): Byte-genau zu verifyBundleObject() in verify.ts --
+    # fuer evidence-package@2.1 IMMER, fuer 2.2/2.3 nur wenn customer_evidence im Bundle gesetzt ist.
+    schema_version = bundle.get("schema_version")
+    if schema_version == "evidence-package@2.1" or (
+        schema_version in ("evidence-package@2.2", "evidence-package@2.3") and "customer_evidence" in bundle
+    ):
+        customer_evidence = bundle.get("customer_evidence")
+        if not isinstance(customer_evidence, dict):
+            return False, "missing_customer_evidence"
+        if customer_evidence.get("customer_summary") != build_customer_summary_de(customer_evidence):
+            return False, "customer_summary_mismatch"
+        customer_approval = customer_evidence.get("approval") if isinstance(customer_evidence.get("approval"), dict) else {}
+        if isinstance(controller_evidence, dict) and customer_approval.get("approval_reference") != controller_evidence.get("approval_reference"):
+            return False, "customer_approval_reference_mismatch"
     attestation = bundle.get("approval_attestation")
     if bundle.get("approval_attestation_required") is True:
         if not approval_key:

@@ -6,6 +6,9 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AsnSerializer, AsnParser, OctetString } from "@peculiar/asn1-schema";
 import { ContentInfo, SignedData, SignerInfo, id_messageDigest } from "@peculiar/asn1-cms";
+import { TSTInfo } from "@peculiar/asn1-tsp";
+
+const RFC3161_SHA256_OID = "2.16.840.1.101.3.4.2.1";
 
 type ClaimLadder = "L0" | "L1" | "L2" | "L3" | "L4";
 
@@ -268,13 +271,43 @@ export function verifyEpistemicGateBinding(bundleIn: EvidenceBundle, trustedPubl
  *  Proof-Policy-Gate-Tests, Punkt 3): observer_receipt wird ebenfalls erst NACH dem Zeitstempel
  *  angehaengt (attachRfc3161Timestamp -> attachApprovalAttestation -> attachObserverReceipt) und
  *  fehlte hier bisher im Ausschluss -- seit Einfuehrung von observer_receipt (05.09.2026) scheiterte
- *  die Bindung bei jedem zusaetzlich vom Observer bezeugten Bundle deterministisch. */
+ *  die Bindung bei jedem zusaetzlich vom Observer bezeugten Bundle deterministisch.
+ *
+ *  06.11.2026 (externe Gegenkritik, Evidence-Forgery-Challenge-Nachtrag): bis hierhin verglich diese
+ *  Funktion NUR das selbst-deklarierte JSON-Feld `timestamped_sha256` gegen den Bundle-Hash -- nie
+ *  gegen den kryptografisch im Token selbst signierten Hash (TSTInfo.messageImprint.hashedMessage).
+ *  Ein Angreifer konnte deshalb einen ECHTEN, gueltig signierten Token fuer Hash A nehmen, ihn an ein
+ *  beliebiges FREMDES Bundle mit Hash B haengen und `timestamped_sha256` einfach auf B setzen --
+ *  weder dieser Check noch verifyRfc3161TsaChain() (prueft nur Signatur/Kette, nie den Hash-Inhalt)
+ *  waren dagegen blind. extractTokenMessageHashHex() unten schliesst die Luecke, identischer Fix wie
+ *  tools/verify-bundle/verify.ts im alex-core-Hauptrepo (kein Shared Import). Python
+ *  (verify_rfc3161_tsa_chain() in packages/langchain-alex/src/langchain_alex/_verifier.py) war davon
+ *  NICHT betroffen -- `openssl ts -verify -digest <timestamped_sha256>` erzwingt diese Bindung dort
+ *  schon immer als Seiteneffekt; dieser Fix bringt nur die TS-Seite auf Python-Parität. */
+function extractTokenMessageHashHex(timestamp: Rfc3161Timestamp): { ok: true; hashHex: string } | { ok: false; reason: string } {
+  try {
+    const tokenDer = Buffer.from(timestamp.token_der_base64, "base64");
+    const contentInfo = AsnParser.parse(tokenDer, ContentInfo);
+    const signedData = AsnParser.parse(new Uint8Array(contentInfo.content), SignedData);
+    const tstInfoOctets = signedData.encapContentInfo.eContent?.single;
+    if (!tstInfoOctets) return { ok: false, reason: "no_encapsulated_content" };
+    const tstInfo = AsnParser.parse(new Uint8Array(tstInfoOctets.buffer), TSTInfo);
+    if (tstInfo.messageImprint.hashAlgorithm.algorithm !== RFC3161_SHA256_OID) return { ok: false, reason: "unsupported_digest_algorithm" };
+    return { ok: true, hashHex: Buffer.from(tstInfo.messageImprint.hashedMessage.buffer).toString("hex") };
+  } catch (e: any) {
+    return { ok: false, reason: `parse_error:${e?.message ?? "unknown"}` };
+  }
+}
+
 export function verifyRfc3161Binding(bundleIn: EvidenceBundle): { ok: boolean; reason?: string } {
   const bundle = withoutReceiptChainEntry(bundleIn);
   if (!bundle.rfc3161_timestamp) return { ok: false, reason: "no_timestamp_present" };
   const { rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...withoutTimestamp } = bundle;
   const recomputed = sha256(JSON.stringify(withoutTimestamp));
   if (recomputed !== rfc3161_timestamp.timestamped_sha256) return { ok: false, reason: "timestamp_hash_mismatch" };
+  const tokenHash = extractTokenMessageHashHex(rfc3161_timestamp);
+  if (tokenHash.ok === false) return { ok: false, reason: `token_${tokenHash.reason}` };
+  if (tokenHash.hashHex !== rfc3161_timestamp.timestamped_sha256) return { ok: false, reason: "token_hash_mismatch" };
   return { ok: true };
 }
 
@@ -2101,7 +2134,15 @@ export interface TrustAnchorConsensus {
  * selbst bleibt die harte Schranke), wird aber unuebersehbar als `divergent`/Fehler gemeldet.
  * WICHTIG: liefert den PEM-Inhalt DIREKT aus den Kanaelen, niemals aus dem zu pruefenden Bundle
  * selbst -- sonst waere der Konsens-Vergleich zirkulaer (ein gefaelschtes Bundle koennte sich
- * sonst einfach selbst als vertrauenswuerdig bestaetigen). */
+ * sonst einfach selbst als vertrauenswuerdig bestaetigen).
+ *
+ * 06.11.2026 (externe Gegenkritik, Evidence-Forgery-Challenge-Nachtrag): key_id war bisher nur ein
+ * vom Kanal frei gewaehltes Label -- die Mehrheitszaehlung zaehlte key_id-STRINGS, nie geprueft, ob
+ * ein Kanal ueberhaupt den PASSENDEN PEM zur behaupteten key_id liefert. Ein kompromittierter/
+ * vorgezogener Kanal konnte die ECHTE key_id mit einem FREMDEN PEM melden und wurde ungeprueft als
+ * "agreed" durchgereicht (agreed_public_key_pem ging direkt und ungeprueft in trustedPublicKey in
+ * main()/runManifestSubcommand() ein). Jeder Kanal, dessen gemeldete key_id nicht zu evidenceSignerKeyId(pem)
+ * passt, wird jetzt VOR der Zaehlung verworfen (key_id_pem_mismatch) -- kann also nie "agreed" werden. */
 export async function crossCheckTrustAnchor(
   purpose: "evidence_package" | "human_approval",
   channels: string[] = DEFAULT_TRUST_ANCHOR_CHANNELS,
@@ -2115,7 +2156,11 @@ export async function crossCheckTrustAnchor(
       const data = (await res.json()) as any;
       const keyId: string | null = purpose === "evidence_package" ? (data.key_id ?? null) : (data.approval_signer?.key_id ?? null);
       const pem: string | null = purpose === "evidence_package" ? (data.public_key_pem ?? null) : (data.approval_signer?.public_key_pem ?? null);
-      results.push({ url, key_id: keyId, public_key_pem: pem });
+      if (keyId && pem && evidenceSignerKeyId(pem) !== keyId) {
+        results.push({ url, key_id: null, public_key_pem: null, error: "key_id_pem_mismatch" });
+      } else {
+        results.push({ url, key_id: keyId, public_key_pem: pem });
+      }
       // 06.11.2026: trust_anchor_registry.revocations[] has been published alongside
       // /.well-known/alex-pubkey.json for a while -- crossCheckTrustAnchor() ignored it until now.
       const revocations = data.trust_anchor_registry?.revocations;
