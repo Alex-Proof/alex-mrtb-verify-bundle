@@ -61,9 +61,28 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-10-31 (Vertrauensgrenze getestet: gueltiger Token vs. vertraute TSA --
-dabei einen echten TS<->Python-Reason-Code-Drift gefunden und gefixt)
+**Zuletzt bearbeitet:** 2026-11-06 (Sicherheitsfund ueber die oeffentliche Evidence-Forgery-
+Challenge: Trust-Anchor-Pin griff nicht im Legacy-Pfad ohne/mit fremdem `schema_version`, gefixt)
 **Von:** Alex-Proof
+
+Echter Fund ueber die oeffentliche Evidence-Forgery-Challenge (`challenge.alexproof.de`), nicht
+von einem externen Melder: `verifyBundleObject()` pruefte den uebergebenen `trustedPublicKey`
+bisher NUR innerhalb des `isDevTaskV2Schema()`-Zweigs. Fehlte `schema_version` komplett oder war
+es ein unbekannter Fremdwert, verifizierte die Signatur nur gegen den IM BUNDLE SELBST
+mitgelieferten `public_key` -- nie gegen `trustedPublicKey`. Ein selbst signiertes Bundle ohne
+`schema_version` wurde dadurch faelschlich als `valid` gegenueber einem fremden Trust-Anchor
+akzeptiert. Details, Repro und Fix: [Issue](https://github.com/Alex-Proof/alex-mrtb-verify-bundle/issues)
+("Trust-anchor pin bypassed in the legacy/unknown schema_version path").
+
+Fix: wird `trustedPublicKey` explizit uebergeben, muss `public_key` auch im Nicht-devtask-v2-Zweig
+dagegen passen. Ein Aufruf OHNE `trustedPublicKey`-Argument bleibt unveraendert (echte, vor dieser
+Haertung entstandene Legacy-Bundles ohne Pinning-Anspruch). Der eigenstaendige Python-Verifier
+(`verify.py`) hatte diese Luecke nie -- er verlangt `trusted_key` unbedingt und lehnt jeden
+unbekannten `schema_version` von vornherein ab, ohne ungepinnten Fallback-Pfad. Neue Tests
+(`test/trust-anchor-legacy-path-bypass.test.mjs`, 4 Faelle). 65 Tests gruen.
+
+**Zuvor, 2026-10-31:** Vertrauensgrenze getestet: gueltiger Token vs. vertraute TSA -- dabei einen
+echten TS<->Python-Reason-Code-Drift gefunden und gefixt.
 
 SaSames dritte Rueckfrage: einen echten, korrekt signierten RFC3161-Token von einer NICHT
 gepinnten Root einsetzen -- Herleitung und Message-Imprint-Bindung muessen bestehen, erst die

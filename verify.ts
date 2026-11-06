@@ -1917,6 +1917,17 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
       return { ok: false, reason: "untrusted_signer" };
     }
     if (!bundle.controller_evidence) return { ok: false, reason: "missing_controller_evidence" };
+  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey) {
+    // 06.11.2026 (real finding via the public Evidence-Forgery Challenge, verdict:"valid" for a
+    // self-signed bundle WITHOUT schema_version): the branch above only checks trustedPublicKey
+    // when schema_version is in DEVTASK_V2_SCHEMA_VERSIONS. If schema_version is missing or an
+    // unknown value, the signature was so far only checked against the public_key embedded in
+    // the bundle itself, never against trustedPublicKey. Anyone who explicitly passes a trust
+    // anchor must be pinned against it here too -- otherwise any self-signed bundle can be
+    // presented as "valid" against a foreign public key. Only active when trustedPublicKey is
+    // actually passed: a call WITHOUT a second argument is unchanged (genuine legacy bundles
+    // predating this hardening, with no pinning claim to begin with).
+    return { ok: false, reason: "untrusted_signer" };
   }
 
   const signedPayload = bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3"
