@@ -94,6 +94,25 @@ def key_id(pem: str) -> str:
     return "ed25519:" + sha256_text(pem)
 
 
+# 06.11.2026 (externe Kritik): verify.ts prueft bundle.approval_attestation_required nur per JS-
+# Truthy ("if (bundle.approval_attestation_required)"), nicht per strikter Gleichheit zu true. Ein
+# gefaelschtes Bundle mit approval_attestation_required: 1 (statt true) wurde von TS weiterhin als
+# "Freigabe erforderlich" gewertet, von Python (bisherige Pruefung: `is True`) aber NICHT -- ein
+# sonst freigabepflichtiges Bundle ohne gueltige approval_attestation wurde dadurch in Python
+# faelschlich akzeptiert. _js_truthy() bildet JS Boolean()-Koerzition fuer JSON-Werte nachbildet:
+# anders als Python ist in JS ein leeres Array/Objekt truthy, waehrend 0/""/null/false falsy sind.
+def _js_truthy(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
 def openssl_verify(public_key: str, payload: bytes, signature_b64: str) -> bool:
     try:
         signature = base64.b64decode(signature_b64, validate=True)
@@ -123,9 +142,12 @@ def verify_rfc3161_binding(bundle: dict[str, Any]) -> tuple[bool, str | None]:
         return False, "no_timestamp_present"
     # Diese vier Felder werden erst nach dem Zeitstempel angehaengt. Signatur und Public Key
     # gehoeren dagegen zur gehashten Nutzlast (identisch zu verifyRfc3161Binding() in verify.ts).
+    # 06.11.2026 (externe Kritik, GitHub-Issue #10): receipt_chain_entry (ADR 06 / vNext 4.12)
+    # haengt als AEUSSERSTE Schicht an und war nie Teil der gehashten Nutzlast -- fehlte hier
+    # bisher, identisch zu withoutReceiptChainEntry() in verify.ts.
     payload = {
         key: value for key, value in bundle.items()
-        if key not in ("rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")
+        if key not in ("rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate", "receipt_chain_entry")
     }
     if sha256_bytes(compact(payload)) != timestamp.get("timestamped_sha256"):
         return False, "timestamp_hash_mismatch"
@@ -462,6 +484,21 @@ def _claim_id(output_hash: str, start: int, end: int, claim_type: str) -> str:
     return "claim:sha256:" + sha256_text(f"{CLAIM_DECOMPOSER_VERSION}\0{output_hash}\0{start}\0{end}\0{claim_type}")
 
 
+# 06.11.2026 (externe Kritik, GitHub-Issue #11): source_start/source_end im claim_decomposition-
+# Artefakt zaehlen UTF-16-Code-Units (JS-String-Semantik in validateClaimDecomposition() in
+# verify.ts, deren originalOutput.slice()/.length nie Codepoints sind), nicht Python-Codepoints.
+# Fuer Zeichen ausserhalb der Basic Multilingual Plane (Emoji, Surrogatpaare) weichen beide
+# Zaehlweisen ab einem solchen Zeichen auseinander. _utf16_len()/_utf16_slice() bilden deshalb
+# .length/.slice() bytegleich nach, statt nativer Python-Indizierung.
+def _utf16_len(value: str) -> int:
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _utf16_slice(value: str, start: int, end: int) -> str:
+    encoded = value.encode("utf-16-le", "surrogatepass")
+    return encoded[start * 2:end * 2].decode("utf-16-le", "surrogatepass")
+
+
 def validate_claim_decomposition(artifact: dict[str, Any], original_output: str, require_review: bool = False) -> str | None:
     """Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- identische Logik zu
     validateClaimDecomposition() in core/claimDecomposition.server.ts / verify.ts."""
@@ -492,11 +529,11 @@ def validate_claim_decomposition(artifact: dict[str, Any], original_output: str,
     for claim in claims:
         start, end = claim.get("source_start"), claim.get("source_end")
         if (not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool)
-                or start < cursor or end <= start or end > len(original_output)):
+                or start < cursor or end <= start or end > _utf16_len(original_output)):
             return "invalid_claim_offsets"
-        if original_output[cursor:start].strip():
+        if _utf16_slice(original_output, cursor, start).strip():
             return "uncovered_source_text"
-        if claim.get("source_text") != original_output[start:end]:
+        if claim.get("source_text") != _utf16_slice(original_output, start, end):
             return "source_text_mismatch"
         claim_type = claim.get("type")
         if claim_type not in CLAIM_ROUTE_BY_TYPE or claim.get("route") != CLAIM_ROUTE_BY_TYPE[claim_type]:
@@ -511,7 +548,7 @@ def validate_claim_decomposition(artifact: dict[str, Any], original_output: str,
         if claim_type in ("mixed", "unknown") and claim.get("status") != "not_verifiable":
             return "unverifiable_status_mismatch"
         cursor = end
-    if original_output[cursor:].strip():
+    if _utf16_slice(original_output, cursor, _utf16_len(original_output)).strip():
         return "uncovered_source_text"
     return None
 
@@ -658,6 +695,12 @@ def build_customer_summary_de(input_: dict[str, Any]) -> str:
 
 
 def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -> tuple[bool, str]:
+    # 06.11.2026 (externe Kritik, GitHub-Issue #10): receipt_chain_entry (ADR 06 / vNext 4.12)
+    # haengt als AEUSSERSTE Schicht an und war nie Teil der signierten Nutzlast -- fehlte hier
+    # bisher komplett, identisch zu withoutReceiptChainEntry() in verify.ts. Ohne diesen Strip
+    # lehnte dieser Verifier jedes sonst gueltige Bundle mit receipt_chain_entry ab
+    # (invalid_signature, weil receipt_chain_entry in den gehashten Payload mit einfloss).
+    bundle = {key: value for key, value in bundle.items() if key != "receipt_chain_entry"}
     if bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS or bundle.get("capability") != "devtask.execution@1.0":
         return False, "unsupported_schema_or_capability"
     # 2.3 ist "2.2 + Pflicht-Gate": erbt dieselbe Spec-Validierung/Kanonisierung wie 2.2, keine
@@ -732,7 +775,7 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
         if isinstance(controller_evidence, dict) and customer_approval.get("approval_reference") != controller_evidence.get("approval_reference"):
             return False, "customer_approval_reference_mismatch"
     attestation = bundle.get("approval_attestation")
-    if bundle.get("approval_attestation_required") is True:
+    if _js_truthy(bundle.get("approval_attestation_required")):
         if not approval_key:
             return False, "missing_approval_trust_anchor"
         if not isinstance(attestation, dict) or attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
@@ -757,6 +800,9 @@ def verify(bundle: dict[str, Any], trusted_key: str, approval_key: str | None) -
 # JSON.stringify() bytegleich (keine Schluessel-Sortierung, kein ASCII-Escaping), deshalb matcht
 # der hier neu berechnete Hash exakt den serverseitig zum Anhaengezeitpunkt berechneten.
 def verify_epistemic_gate_binding(bundle: dict[str, Any], trusted_key: str) -> tuple[bool, str | None]:
+    # 06.11.2026 (externe Kritik, GitHub-Issue #10): receipt_chain_entry haengt NACH epistemic_gate
+    # an und war nie Teil der gehashten Nutzlast -- identisch zu withoutReceiptChainEntry() in verify.ts.
+    bundle = {key: value for key, value in bundle.items() if key != "receipt_chain_entry"}
     attestation = bundle.get("epistemic_gate")
     if not attestation:
         return False, "epistemic_gate_not_attached"
@@ -801,7 +847,7 @@ def evaluate_proof_policy(policy: dict[str, Any], bundle: dict[str, Any], effect
         record("claim_ladder_min", requires["claim_ladder_min"],
                 CLAIM_LADDER_RANK.get(effective_claim_ladder, -1) >= CLAIM_LADDER_RANK.get(requires["claim_ladder_min"], 99))
     if requires.get("human_approval") == "required":
-        record("human_approval", "required", bundle.get("approval_attestation_required") is True)
+        record("human_approval", "required", _js_truthy(bundle.get("approval_attestation_required")))
     if requires.get("no_unsupported_required_claims") is True:
         unsupported = any(claim["required"] and not claim["supported"] for claim in claim_evidence_ref_assessments(bundle))
         record("no_unsupported_required_claims", True, not unsupported)

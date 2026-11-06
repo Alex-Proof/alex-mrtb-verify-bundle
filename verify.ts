@@ -1256,6 +1256,10 @@ const WRITE_INTEGRITY_CAPABILITY = "memory.write.integrity@1.0";
 const TAMPER_EVIDENT_CAPABILITY = "memory.audit.tamper_evident@1.0";
 const RECOVERY_VERIFIED_CAPABILITY = "memory.recovery.verified@1.0";
 const DEVTASK_EXECUTION_CAPABILITY = "devtask.execution@1.0";
+// 06.11.2026 (Nachtrag zum unsupported_capability-Default-Deny, Issue #13): getCoreReadiness()
+// signiert einen reinen Signatur-Rundlauf-Probe damit, ohne je ein capability-spezifisches
+// trace_events-Format zu erzeugen.
+const CORE_SELF_TEST_CAPABILITY = "alex.core.self_test@1.0";
 const MEMORY_WRITE_EVENT_PREFIX = "memory_write:";
 const MEMORY_STATE_READ_EVENT_PREFIX = "memory_state_read:";
 const TENANT_ACCESS_PROBE_EVENT_PREFIX = "tenant_access_probe:";
@@ -2044,21 +2048,35 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
     }
   }
 
-  if (!isDevTaskV2Schema(bundle.schema_version) && (
-    bundle.capability === PROVENANCE_CAPABILITY ||
-    bundle.capability === DELETE_ENFORCED_CAPABILITY ||
-    bundle.capability === TENANT_ISOLATION_CAPABILITY ||
-    bundle.capability === WRITE_INTEGRITY_CAPABILITY ||
-    bundle.capability === TAMPER_EVIDENT_CAPABILITY ||
-    bundle.capability === RECOVERY_VERIFIED_CAPABILITY ||
-    bundle.capability === DEVTASK_EXECUTION_CAPABILITY
-  )) {
-    const derivedOutcome = deriveOutcomeFromTrace(bundle.capability, bundle.trace_events);
-    if (bundle.outcome !== derivedOutcome) {
-      return {
-        ok: false,
-        reason: `trace_outcome_mismatch:declared=${bundle.outcome}:derived=${derivedOutcome}`,
-      };
+  // 06.11.2026 (externe Kritik, GitHub-Issue #13, mit Andre abgestimmt, nach einem echten
+  // Testlauf-Fund auf "nur bei gepinntem trustedPublicKey" eingeschraenkt): eine capability
+  // ausserhalb dieser 7 Konstanten liess den gesamten Trace-Outcome-Abgleich bisher ersatzlos aus
+  // -- ein gueltig signiertes Bundle mit frei erfundener capability, leerer Trace und
+  // outcome:"verified" bestand dadurch ohne jeden Trace-Beleg. Default-Deny nur, wenn
+  // trustedPublicKey ueberhaupt uebergeben wurde -- identisches Muster zum Legacy-Schema-Fix
+  // (Issue #2/#3): ein Aufruf ohne Pinning-Anspruch bleibt unveraendert, sonst brechen echte,
+  // vor dieser Haertung entstandene Legacy-Fixtures mit absichtlich unbekannten,
+  // capability-agnostischen Platzhalter-capabilities.
+  if (!isDevTaskV2Schema(bundle.schema_version) && bundle.capability !== CORE_SELF_TEST_CAPABILITY) {
+    const knownCapability =
+      bundle.capability === PROVENANCE_CAPABILITY ||
+      bundle.capability === DELETE_ENFORCED_CAPABILITY ||
+      bundle.capability === TENANT_ISOLATION_CAPABILITY ||
+      bundle.capability === WRITE_INTEGRITY_CAPABILITY ||
+      bundle.capability === TAMPER_EVIDENT_CAPABILITY ||
+      bundle.capability === RECOVERY_VERIFIED_CAPABILITY ||
+      bundle.capability === DEVTASK_EXECUTION_CAPABILITY;
+    if (!knownCapability && trustedPublicKey !== undefined) {
+      return { ok: false, reason: `unsupported_capability:${bundle.capability}` };
+    }
+    if (knownCapability) {
+      const derivedOutcome = deriveOutcomeFromTrace(bundle.capability, bundle.trace_events);
+      if (bundle.outcome !== derivedOutcome) {
+        return {
+          ok: false,
+          reason: `trace_outcome_mismatch:declared=${bundle.outcome}:derived=${derivedOutcome}`,
+        };
+      }
     }
   }
 
@@ -2480,10 +2498,22 @@ function reportedAnchorStatus(anchor: unknown): ObserverCheckResult["anchor_stat
  *  crossCheckTrustAnchor() in Phase 1.2 schon einmal vor dem Commit korrigiert wurde). Prueft den
  *  Merkle-Inclusion-Proof selbst nach. Eine Bitcoin-Bestaetigung wird hier NICHT kryptografisch
  *  geprueft. Der vom Observer gemeldete Status wird deshalb nur als
- *  `observer_reported_bitcoin_confirmed` ausgegeben und nicht als eigener Bitcoin-Nachweis. */
-export async function crossCheckObserverReceipt(bundleIn: EvidenceBundle): Promise<ObserverCheckResult> {
+ *  `observer_reported_bitcoin_confirmed` ausgegeben und nicht als eigener Bitcoin-Nachweis.
+ *
+ *  06.11.2026 (externe Kritik, GitHub-Issue #4): expectedObserverUrl ist optional, weil dieser
+ *  eigenstaendige Verifier (anders als eine interne Produktionspipeline mit einem einzigen
+ *  konfigurierten Observer) absichtlich beliebige Evidence-Produzenten mit je eigenem
+ *  Observer-Deployment pruefen kann/soll -- kein fester Wert ist hier allgemein richtig. Ein
+ *  Aufrufer, der den erwarteten Observer kennt, MUSS ihn uebergeben; dann wird ein abweichender
+ *  observer_url verworfen, BEVOR ueberhaupt gefetcht wird (sonst liesse sich mit einem
+ *  bundle-eigenen observer_url ein beliebiger, auch interner/lokaler, Endpunkt als "unabhaengiger
+ *  Observer" ausgeben -- SSRF plus faelschbare Selbstbestaetigung). */
+export async function crossCheckObserverReceipt(bundleIn: EvidenceBundle, expectedObserverUrl?: string): Promise<ObserverCheckResult> {
   const bundle = withoutReceiptChainEntry(bundleIn);
   if (!bundle.observer_receipt) return { ok: false, reason: "not_applicable_no_observer_receipt" };
+  if (expectedObserverUrl !== undefined && bundle.observer_receipt.observer_url !== expectedObserverUrl) {
+    return { ok: false, reason: "observer_url_not_allowed" };
+  }
   // 26.09.2026: epistemic_gate haengt NACH observer_receipt an (attachEpistemicGateAttestation(),
   // host/receipts.server.ts) -- gleicher Ausschluss noetig wie rfc3161_timestamp/approval_attestation
   // oben, sonst kennt der hier gehashte Stand ein Feld nicht, das beim Original-Attach noch fehlte.

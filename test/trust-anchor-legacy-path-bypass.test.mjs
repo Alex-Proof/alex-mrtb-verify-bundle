@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 import { verifyBundleObject } from "../dist/verify.js";
 
@@ -19,10 +19,28 @@ function freshEd25519() {
   });
 }
 
+function buildHashChain(events) {
+  const chain = [];
+  let prev = "genesis";
+  for (const event of events) {
+    const hash = createHash("sha256").update(prev + event).digest("hex");
+    chain.push(hash);
+    prev = hash;
+  }
+  return chain;
+}
+
+// 06.11.2026 (Fix fuer GitHub-Issue #13, unsupported_capability-Default-Deny): dieser Test prueft
+// ausschliesslich Trust-Anchor-Pinning im Legacy-Pfad, nicht Capability-/Outcome-Semantik --
+// deshalb eine echte, bekannte capability (memory.audit.tamper_evident@1.0) mit einer minimalen,
+// trivial "verified" ableitenden Trace statt der frueheren, jetzt als unsupported_capability
+// abgelehnten freien capability "test".
+const TAMPER_EVIDENT_TRACE_EVENTS = [`audit_chain_check:${JSON.stringify({ source: "audit_chain_probe", chain_valid: true })}`];
+
 function selfSignedLegacyBundle(privateKey, publicKey, extra = {}) {
   const payload = {
-    bundle_id: "test-bundle", capability: "test", run_id: "run-1", claim_ladder: "L0",
-    executed_at: new Date().toISOString(), trace_events: [], trace_hash_chain: [],
+    bundle_id: "test-bundle", capability: "memory.audit.tamper_evident@1.0", run_id: "run-1", claim_ladder: "L0",
+    executed_at: new Date().toISOString(), trace_events: TAMPER_EVIDENT_TRACE_EVENTS, trace_hash_chain: buildHashChain(TAMPER_EVIDENT_TRACE_EVENTS),
     outcome: "verified", ...extra,
   };
   const signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString("base64");
