@@ -484,6 +484,7 @@ npm install
 npm test
 npm run verify -- sample-bundle.json
 npm run verify -- invalid-tampered-bundle.json
+npm run verify -- forged-resigned-bundle.json
 ```
 
 Evidence Package V2 benötigt zusätzlich den separat bezogenen Trust-Anchor:
@@ -515,13 +516,39 @@ einer Rotation mit alten Bundles passiert, und was dabei automatisiert ist und w
 Expected results:
 
 - the test suite passes;
-- `sample-bundle.json` is accepted as `VERIFIED`;
-- the deliberately altered bundle is rejected with exit code `2` and `invalid_signature`.
+- `sample-bundle.json` prints `SELF-CONSISTENT ONLY` with exit code `7` — no trust anchor was
+  given, so the signature is only checked against the `public_key` embedded in the bundle itself,
+  which proves nothing about who signed it;
+- the deliberately altered bundle is rejected with exit code `2` and `invalid_signature`;
+- `forged-resigned-bundle.json` — a bundle re-signed from scratch with a freshly generated,
+  attacker-controlled keypair after editing an event — also only reaches `SELF-CONSISTENT ONLY`
+  without a trust anchor, and is rejected with `untrusted_signer` once one is pinned (see below).
+  This is the exact attack a bare `verify.py <bundle>.json` invited before 07.11.2026.
 
-The verifier distinguishes three outcomes:
+**07.11.2026: `VERIFIED` without a trust anchor was removed.** Before this date, a bundle lacking
+`schema_version` (the legacy/V1 path, including `sample-bundle.json`) was accepted as `VERIFIED`
+purely by checking its own embedded `public_key` against its own signature — self-consistency, not
+independent verification. Anyone could generate a fresh Ed25519 keypair, edit an event, re-sign the
+whole bundle, and get `VERIFIED` back. `forged-resigned-bundle.json` is exactly that: committed here
+so this is checkable by running the command above, not just read. Always pass a `trusted-key.pem`
+(see "Den zu verwendende Trust-Anchor" above) to get an actual `VERIFIED`/`REJECTED` verdict about
+*who* signed the bundle, not just whether it is internally consistent.
 
-- `VERIFIED`: the supplied evidence satisfies the supported formal contract;
-- `FAILED`: the supplied evidence contradicts that contract;
+To actually verify who signed a bundle:
+
+```bash
+curl -s https://alexproof.de/.well-known/alex-pubkey.json | python3 -c "import json,sys; print(json.load(sys.stdin)['public_key_pem'])" > trusted-key.pem
+npm run verify -- sample-bundle.json trusted-key.pem
+```
+
+The verifier distinguishes four outcomes:
+
+- `VERIFIED`: a trust anchor was supplied, and the signed evidence satisfies the supported formal
+  contract under that anchor;
+- `SELF-CONSISTENT ONLY` (exit `7`): no trust anchor was supplied for a legacy/non-V2 bundle — the
+  signature checks out against the bundle's own embedded key, which is not independent verification;
+- `FAILED` / `REJECTED`: the supplied evidence (or signer) contradicts the formal contract or the
+  pinned anchor;
 - `INCONCLUSIVE`: the available evidence is insufficient.
 
 ## What it verifies

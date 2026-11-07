@@ -2900,6 +2900,18 @@ async function main() {
     return;
   }
 
+  // 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trustedPublicKey prueft der
+  // Legacy-/Nicht-V2-Pfad die Signatur NUR gegen den im Bundle selbst eingebetteten public_key --
+  // wer sein eigenes Keypair erzeugt, ein Event aendert und das Bundle komplett neu signiert,
+  // bekaeme sonst "✅ ... verified" ausgegeben, obwohl niemand Fremdes den Signierschluessel
+  // bestaetigt hat. isDevTaskV2Schema-Bundles sind unberuehrt (dort erzwingt crossCheckTrustAnchor()
+  // weiter oben bzw. der Pin-Vergleich in verifyBundleObject() bereits einen echten Anker).
+  if (!trustedPublicKey && !isDevTaskV2Schema(bundle.schema_version)) {
+    console.log(`⚠️  SELF-CONSISTENT ONLY — no trust anchor. Signature matches the public_key embedded IN THIS BUNDLE, which proves nothing about who actually signed it (anyone can generate a keypair, edit an event, and re-sign). Pass a trusted-key.pem (the current key from https://alexproof.de/.well-known/alex-pubkey.json) as the second argument to verify the signer.`);
+    process.exitCode = 7;
+    return;
+  }
+
   // Bauanleitung 1.4, Rest (05.09.2026): harte Zusatzpruefung, kein reines Konsistenz-Signal wie
   // ci_result (das der Controller selbst signiert) -- hier fragt der Verifier GitHub UNABHAENGIG
   // vom Controller. ALEX_VERIFY_SKIP_GITHUB_DIFF=1 als bewusster Not-Ausweg fuer

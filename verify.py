@@ -1541,6 +1541,19 @@ def main() -> int:
             with open(args.approval_key, encoding="utf-8") as handle:
                 approval = handle.read()
         ok, reason = verify(bundle, trusted, approval)
+        # 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trusted_key prueft der
+        # Legacy-/Nicht-V2-Pfad die Signatur NUR gegen den im Bundle selbst eingebetteten
+        # public_key -- wer sein eigenes Keypair erzeugt, ein Event aendert und das Bundle
+        # komplett neu signiert, bekaeme sonst VERIFIED ausgegeben, obwohl niemand Fremdes den
+        # Signierschluessel bestaetigt hat. Identisch zu main() in verify.ts.
+        if ok and trusted is None and bundle.get("schema_version") not in DEVTASK_V2_SCHEMA_VERSIONS:
+            print("SELF-CONSISTENT ONLY -- no trust anchor. Signature matches the public_key "
+                  "embedded IN THIS BUNDLE, which proves nothing about who actually signed it "
+                  "(anyone can generate a keypair, edit an event, and re-sign). Pass a "
+                  "trusted-key.pem (the current key from "
+                  "https://alexproof.de/.well-known/alex-pubkey.json) as the second argument "
+                  "to verify the signer.")
+            return 7
         print("VERIFIED" if ok else f"REJECTED: {reason}")
         if not ok:
             return 2

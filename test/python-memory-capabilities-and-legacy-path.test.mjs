@@ -62,14 +62,35 @@ function pythonDeriveOutcomeFromTrace(capability, events) {
   return result.stdout.trim();
 }
 
-test("Grund-Regression: sample-bundle.json verifies under Python without a trusted_key, matching Node's single-arg CLI (Issue #9)", () => {
+test("07.11.2026 fix: sample-bundle.json without a trusted_key is SELF-CONSISTENT ONLY, not VERIFIED, identically in Node and Python", () => {
+  // Vorher (Issue #9) gaben beide CLIs hier VERIFIED/exit 0 aus, obwohl kein Anker gepruefi wurde --
+  // das Loch, das die AWM-Sketch-Review (07.11.2026) am lebenden Repo nachgewiesen hat
+  // (forged-resigned-bundle.json: eigener Key, veraendertes Event, neu signiert -> VERIFIED ohne Anker).
   const bundlePath = fileURLToPath(new URL("../sample-bundle.json", import.meta.url));
   const node = spawnSync("node", ["dist/verify.js", "sample-bundle.json"], { cwd: verifierDir, encoding: "utf8" });
   const python = spawnSync(process.env.PYTHON ?? "python", ["verify.py", "sample-bundle.json"], { cwd: verifierDir, encoding: "utf8" });
-  assert.equal(node.status, 0, node.stderr + node.stdout);
-  assert.equal(python.status, 0, python.stderr + python.stdout);
-  assert.match(python.stdout, /^VERIFIED/);
+  assert.equal(node.status, 7, node.stderr + node.stdout);
+  assert.equal(python.status, 7, python.stderr + python.stdout);
+  assert.match(node.stdout, /SELF-CONSISTENT ONLY/);
+  assert.match(python.stdout, /SELF-CONSISTENT ONLY/);
   JSON.parse(readFileSync(bundlePath, "utf8"));
+});
+
+test("07.11.2026 fix: forged-resigned-bundle.json (own keypair, edited event, fully re-signed) is rejected once a real trust anchor is pinned", () => {
+  // Reproduziert den Angriff, den die Sketch-Review verlangt hat: gefaelschtes Bundle mit
+  // selbst erzeugtem Schluessel bekommt ohne Anker SELF-CONSISTENT ONLY, mit dem echten
+  // gepinnten Anker REJECTED: untrusted_signer -- nie VERIFIED.
+  const forgedPath = fileURLToPath(new URL("../forged-resigned-bundle.json", import.meta.url));
+  const forged = JSON.parse(readFileSync(forgedPath, "utf8"));
+  const signer = freshEd25519();
+  const node = spawnSync("node", ["dist/verify.js", "forged-resigned-bundle.json"], { cwd: verifierDir, encoding: "utf8" });
+  assert.equal(node.status, 7, node.stderr + node.stdout);
+  assert.match(node.stdout, /SELF-CONSISTENT ONLY/);
+  const tsWithWrongAnchor = verifyBundleObject(forged, signer.publicKey);
+  assert.deepEqual(tsWithWrongAnchor, { ok: false, reason: "untrusted_signer" });
+  const pyWithWrongAnchor = pythonVerify(forged, signer.publicKey, undefined);
+  assert.equal(pyWithWrongAnchor.status, 2);
+  assert.match(pyWithWrongAnchor.stdout, /^REJECTED: untrusted_signer/);
 });
 
 test("invalid-tampered-bundle.json is rejected by Python with the same exit code as Node (Issue #9 regression guard)", () => {
@@ -150,15 +171,15 @@ test("derive_outcome_from_trace: TS and Python agree for all 6 memory.* capabili
   }
 });
 
-test("Python verify() accepts a signed memory.* bundle without a trusted_key, matching verifyBundleObject() (Issue #9)", () => {
+test("verifyBundleObject() library call still accepts a signed memory.* bundle without a trusted_key (self-consistency, library level unchanged); the CLI wrapper no longer calls that VERIFIED", () => {
   for (const [capability, cases] of Object.entries(MEMORY_CAPABILITY_CASES)) {
     const signer = freshEd25519();
     const bundle = signedMemoryBundle(signer.privateKey, signer.publicKey, capability, cases.verified, "verified");
     const tsResult = verifyBundleObject(bundle);
-    assert.deepEqual(tsResult, { ok: true }, `TS for ${capability}`);
+    assert.deepEqual(tsResult, { ok: true }, `TS library for ${capability}`);
     const pyResult = pythonVerify(bundle, undefined, undefined);
-    assert.equal(pyResult.status, 0, `Python for ${capability}: ${pyResult.stderr}`);
-    assert.match(pyResult.stdout, /^VERIFIED/, `Python stdout for ${capability}`);
+    assert.equal(pyResult.status, 7, `Python CLI for ${capability}: ${pyResult.stderr}`);
+    assert.match(pyResult.stdout, /SELF-CONSISTENT ONLY/, `Python CLI stdout for ${capability}`);
   }
 });
 
@@ -176,7 +197,7 @@ test("Python verify() rejects a tampered outcome declaration for a memory.* bund
 
 // Legacy-Signaturpfad (4 Faelle): self-signed V1-Bundle MIT und OHNE trustedPublicKey, je ein
 // korrekter und ein falscher Schluessel -- Python-Spiegel zu trust-anchor-legacy-path-bypass.test.mjs.
-test("Python legacy signature path: trusted_key omitted stays unchanged (unpinned legacy bundle verifies)", () => {
+test("Python legacy signature path: trusted_key omitted -> CLI reports SELF-CONSISTENT ONLY (exit 7), never VERIFIED", () => {
   const signer = freshEd25519();
   const events = MEMORY_CAPABILITY_CASES["memory.audit.tamper_evident@1.0"].verified;
   const bundle = signedMemoryBundle(signer.privateKey, signer.publicKey, "memory.audit.tamper_evident@1.0", events, "verified");
@@ -184,8 +205,8 @@ test("Python legacy signature path: trusted_key omitted stays unchanged (unpinne
   const tsResult = verifyBundleObject(bundle);
   assert.deepEqual(tsResult, { ok: true });
   const pyResult = pythonVerify(bundle, undefined, undefined);
-  assert.equal(pyResult.status, 0, pyResult.stderr);
-  assert.match(pyResult.stdout, /^VERIFIED/);
+  assert.equal(pyResult.status, 7, pyResult.stderr);
+  assert.match(pyResult.stdout, /SELF-CONSISTENT ONLY/);
 });
 
 test("Python legacy signature path: trusted_key provided and matching verifies", () => {
