@@ -575,6 +575,12 @@ def validate_spec_v1(bundle: dict[str, Any]) -> str | None:
     for field in required:
         if field not in bundle or bundle[field] is None:
             return f"spec_validation_failed:missing_required_field:{field}"
+    # 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag, identischer Fix wie
+    # validateDevTaskEvidenceSpecV1() in verify.ts): verify() unten prueft approval_attestation_
+    # required nur noch truthy, aber ohne diese Typ-Pruefung hier koennte ein truthy
+    # Nicht-Boolean (z.B. 1 oder "true") anders gewertet werden als derselbe Wert in TS.
+    if not isinstance(bundle.get("approval_attestation_required"), bool):
+        return "spec_validation_failed:approval_attestation_required_type"
     allowed = set(required) | {"customer_evidence", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate"}
     if bundle.get("spec_version") != DEVTASK_EVIDENCE_SPEC_VERSION:
         return "spec_validation_failed:unsupported_spec_version"
@@ -630,6 +636,20 @@ def _utf16_slice(value: str, start: int, end: int) -> str:
     return encoded[start * 2:end * 2].decode("utf-16-le", "surrogatepass")
 
 
+# 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag, identischer Fix wie
+# splitsSurrogatePair() in verify.ts): eine Claim-Grenze mitten in einem Surrogatpaar erzeugt ein
+# einzelnes, halbes ("lone") Surrogat-Zeichen -- ungueltiger Unicode, der weiter unten beim
+# UTF-8-Encodieren mit UnicodeEncodeError crasht. An der Wurzel verhindern.
+def _splits_surrogate_pair(value: str, index: int) -> bool:
+    encoded = value.encode("utf-16-le", "surrogatepass")
+    length = len(encoded) // 2
+    if index <= 0 or index >= length:
+        return False
+    high = int.from_bytes(encoded[(index - 1) * 2:index * 2], "little")
+    low = int.from_bytes(encoded[index * 2:(index + 1) * 2], "little")
+    return 0xD800 <= high <= 0xDBFF and 0xDC00 <= low <= 0xDFFF
+
+
 def validate_claim_decomposition(artifact: dict[str, Any], original_output: str, require_review: bool = False) -> str | None:
     """Re-validiert ein Artefakt ohne dem Erzeuger zu vertrauen -- identische Logik zu
     validateClaimDecomposition() in core/claimDecomposition.server.ts / verify.ts."""
@@ -660,7 +680,8 @@ def validate_claim_decomposition(artifact: dict[str, Any], original_output: str,
     for claim in claims:
         start, end = claim.get("source_start"), claim.get("source_end")
         if (not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool)
-                or start < cursor or end <= start or end > _utf16_len(original_output)):
+                or start < cursor or end <= start or end > _utf16_len(original_output)
+                or _splits_surrogate_pair(original_output, start) or _splits_surrogate_pair(original_output, end)):
             return "invalid_claim_offsets"
         if _utf16_slice(original_output, cursor, start).strip():
             return "uncovered_source_text"
@@ -878,7 +899,15 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
     # fuer is_v2 sind beide ohnehin identisch (gerade erst erzwungen), fuer den ungepinnten
     # Legacy-Pfad ist trusted_key None und nur embedded ist ueberhaupt ein gueltiger Schluessel.
     payload = {key: value for key, value in bundle.items() if key not in ("signature", "public_key", "rfc3161_timestamp", "approval_attestation", "observer_receipt", "epistemic_gate")}
-    signed_payload = canonical_evidence_bytes(payload) if schema_version in ("evidence-package@2.2", "evidence-package@2.3") else compact(payload)
+    # 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag): zweite, defensive
+    # Absicherung neben dem Wurzel-Fix in validate_claim_decomposition() (lone Surrogate duerfen
+    # dort gar nicht erst entstehen) -- ein Bundle, das diesen Pfad trotzdem erreicht (z.B. altes,
+    # vor dem Fix signiertes Material), soll hier mit einem regulaeren Ablehnungsgrund scheitern
+    # statt mit einer ungefangenen UnicodeEncodeError.
+    try:
+        signed_payload = canonical_evidence_bytes(payload) if schema_version in ("evidence-package@2.2", "evidence-package@2.3") else compact(payload)
+    except UnicodeEncodeError:
+        return False, "invalid_unicode_payload"
     if not openssl_verify(embedded, signed_payload, str(bundle.get("signature", ""))):
         return False, "invalid_signature"
     # 28.09.2026 (Iman/EMILIA-Feedback): fuer evidence-package@2.3 ist epistemic_gate PFLICHT, nicht
@@ -960,9 +989,16 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
                 return False, f"trace_outcome_mismatch:declared={bundle.get('outcome')}:derived={derived_outcome}"
     attestation = bundle.get("approval_attestation")
     if _js_truthy(bundle.get("approval_attestation_required")):
+        # 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag): Reihenfolge identisch
+        # zu verifyBundleObject() in verify.ts -- fehlende Attestation wird dort IMMER zuerst
+        # gemeldet, unabhaengig davon, ob ein Trust-Anchor uebergeben wurde. Die vorherige
+        # Reihenfolge hier (Trust-Anchor zuerst) lieferte bei fehlendem approval_key einen anderen
+        # Ablehnungsgrund als TS fuer denselben Fall -- eine echte Divergenz.
+        if not isinstance(attestation, dict):
+            return False, "missing_approval_attestation"
         if not approval_key:
             return False, "missing_approval_trust_anchor"
-        if not isinstance(attestation, dict) or attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
             return False, "untrusted_approval_signer"
         approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
         if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):

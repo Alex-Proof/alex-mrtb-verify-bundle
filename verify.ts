@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AsnSerializer, AsnParser, OctetString } from "@peculiar/asn1-schema";
 import { ContentInfo, SignedData, SignerInfo, id_messageDigest } from "@peculiar/asn1-cms";
 import { TSTInfo } from "@peculiar/asn1-tsp";
+import { z } from "zod";
 
 const RFC3161_SHA256_OID = "2.16.840.1.101.3.4.2.1";
 
@@ -128,6 +129,54 @@ export interface EvidenceBundle {
   epistemic_gate?: EpistemicGateAttestationV1;
 }
 
+// 08.11.2026 (Mirror-Sync-Nachtrag zum Mono-Repo-Commit, Memory
+// evidence_forgery_external_critique_4points / evidence_bundle_envelope_fuzz_test): Tuersteher-Gate
+// vor jeder Krypto-/Trace-Logik -- wertvoll genau fuer diese Bibliothek, da verifyBundleObject()
+// hier von Downstream-Konsumenten direkt mit UNTRUSTED Netzwerk-Input aufgerufen wird (das ist der
+// Zweck eines Verifier-Pakets). Prueft NUR die Top-Level-Huelle strikt (Typen + keine unbekannten
+// Top-Level-Felder) -- verschachtelte Payloads (controller_evidence, customer_evidence, ...)
+// bleiben bewusst unmodelliert und werden weiterhin von der bestehenden, getesteten Logik unten
+// gegengeprueft. Feldumfang identisch zu EvidenceBundle oben (kein governance_tuple/
+// independent_verifier_attestation -- die gibt es in diesem Mirror nicht).
+const EvidenceBundleEnvelopeSchema = z.strictObject({
+  schema_version: z.enum(["evidence-package@2.0", "evidence-package@2.1", "evidence-package@2.2", "evidence-package@2.3"]).optional(),
+  spec_version: z.string().optional(),
+  bundle_id: z.string(),
+  capability: z.string(),
+  run_id: z.string(),
+  claim_ladder: z.enum(["L0", "L1", "L2", "L3", "L4"]),
+  executed_at: z.string(),
+  trace_events: z.array(z.string()),
+  trace_hash_chain: z.array(z.string()),
+  outcome: z.enum(["verified", "failed", "inconclusive"]),
+  customer_evidence: z.record(z.string(), z.unknown()).optional(),
+  claim_decomposition: z.record(z.string(), z.unknown()).optional(),
+  signature: z.string(),
+  public_key: z.string(),
+  signer_key_id: z.string().optional(),
+  controller_evidence: z.record(z.string(), z.unknown()).optional(),
+  required_evidence: z.array(z.string()).optional(),
+  rfc3161_timestamp: z.record(z.string(), z.unknown()).optional(),
+  approval_attestation_required: z.boolean().optional(),
+  approval_attestation: z.record(z.string(), z.unknown()).optional(),
+  observer_receipt: z.record(z.string(), z.unknown()).optional(),
+  epistemic_gate: z.record(z.string(), z.unknown()).optional(),
+});
+
+/** Strikte Huellen-Pruefung fuer unauthentifiziert eingehende Bundles, VOR jedem Zugriff auf
+ *  Krypto- oder Trace-Logik. Lehnt unbekannte Top-Level-Felder, fehlende Pflichtfelder und
+ *  Typ-Verwechslungen (z.B. approval_attestation_required als "true"-String statt Boolean) ab,
+ *  statt sie implizit durchzulassen und erst tief in der Verifikationslogik zu scheitern. */
+export function validateEvidenceBundleEnvelope(input: unknown): { ok: boolean; reason?: string; bundle?: EvidenceBundle } {
+  const result = EvidenceBundleEnvelopeSchema.safeParse(input);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const field = issue?.path.join(".") || "root";
+    return { ok: false, reason: `envelope_schema_violation:${field}:${issue?.code ?? "invalid"}` };
+  }
+  return { ok: true, bundle: result.data as unknown as EvidenceBundle };
+}
+
 export interface ObserverReceipt {
   schema_version: "observer-receipt@1.0";
   observer_url: string;
@@ -183,6 +232,19 @@ function claimId(outputHash: string, start: number, end: number, type: ClaimType
   return `claim:sha256:${sha256(`${CLAIM_DECOMPOSER_VERSION}\0${outputHash}\0${start}\0${end}\0${type}`)}`;
 }
 
+// 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag): source_start/source_end
+// zaehlen UTF-16-Code-Units (originalOutput.slice()/.length unten). Liegt eine Grenze mitten in
+// einem Surrogatpaar (z.B. einem Emoji), entsteht beim .slice() ein einzelnes, halbes ("lone")
+// Surrogat-Zeichen -- ungueltiger Unicode, der im eigenstaendigen Python-Verifier beim
+// UTF-8-Encodieren mit UnicodeEncodeError crasht statt regulaer abzulehnen. Identischer Fix wie
+// _splits_surrogate_pair() in verify.py.
+function splitsSurrogatePair(text: string, index: number): boolean {
+  if (index <= 0 || index >= text.length) return false;
+  const high = text.charCodeAt(index - 1);
+  const low = text.charCodeAt(index);
+  return high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF;
+}
+
 // reviewed_at: strenges ISO8601 (UTC/Z) statt Date.parse wie core/claimDecomposition.server.ts.
 // Date.parse ist fuer Nicht-ISO-Strings implementierungsdefiniert und im eigenstaendigen Python-
 // Verifier (_verifier.py ISO8601_RE) nicht byte-treu nachbaubar -- fuer sprachuebergreifend identische
@@ -211,7 +273,8 @@ export function validateClaimDecomposition(artifact: ClaimDecomposition, origina
   let cursor = 0;
   for (const claim of artifact.claims) {
     if (!Number.isInteger(claim.source_start) || !Number.isInteger(claim.source_end)
-      || claim.source_start < cursor || claim.source_end <= claim.source_start || claim.source_end > originalOutput.length) {
+      || claim.source_start < cursor || claim.source_end <= claim.source_start || claim.source_end > originalOutput.length
+      || splitsSurrogatePair(originalOutput, claim.source_start) || splitsSurrogatePair(originalOutput, claim.source_end)) {
       return "invalid_claim_offsets";
     }
     if (/\S/u.test(originalOutput.slice(cursor, claim.source_start))) return "uncovered_source_text";
@@ -2098,6 +2161,13 @@ export function validateDevTaskEvidenceSpecV1(bundle: EvidenceBundle): string | 
   ] as const;
   for (const field of required) if (!Object.hasOwn(bundle, field) || bundle[field] === undefined) {
     return `spec_validation_failed:missing_required_field:${field}`;
+  }
+  // 08.11.2026 (Differenz-Fuzzer-Fund im Mono-Repo, Mirror-Nachtrag): verify() weiter unten prueft
+  // approval_attestation_required nur noch als "ist truthy", aber ohne Typ-Pruefung hier koennte
+  // das Python-Pendant einen truthy Nicht-Boolean (z.B. 1 oder "true") anders werten als TS fuer
+  // denselben Wert. An der Wurzel schliessen: der Typ muss auf beiden Seiten identisch hart sein.
+  if (typeof bundle.approval_attestation_required !== "boolean") {
+    return "spec_validation_failed:approval_attestation_required_type";
   }
   if (bundle.spec_version !== DEVTASK_EVIDENCE_SPEC_VERSION) return "spec_validation_failed:unsupported_spec_version";
   if (bundle.capability !== DEVTASK_EXECUTION_CAPABILITY) return "spec_validation_failed:capability_mismatch";

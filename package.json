@@ -42,7 +42,8 @@
     "@peculiar/asn1-schema": "^2.9.4",
     "@peculiar/asn1-tsp": "^2.9.4",
     "@peculiar/asn1-x509": "^2.9.4",
-    "@sigstore/verify": "3.1.1"
+    "@sigstore/verify": "3.1.1",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
