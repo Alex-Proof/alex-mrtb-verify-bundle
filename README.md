@@ -732,6 +732,21 @@ contradictory, or inconclusive.
 `private: true` is intentional. This repository is public source, but the package is not currently
 published to the npm registry and does not install a global command.
 
+## Prebuilt binaries
+
+For people who want to check a bundle without installing Node: each `v*` release tag publishes
+standalone, self-contained programs for Windows/macOS/Linux (GitHub Releases, built by
+`.github/workflows/release.yml` straight from that tag's source, no Node install needed to run
+them). They cover evidence-bundle, agent-passport-card and challenge-response checks. `verdict-artifact`
+verification is the one exception and still needs the source checkout (`node dist/verify.js`) --
+that check pins itself to a hash of its own running source file, which has no meaning once the code
+is baked into a binary blob, so the binary says so and refuses rather than fake it.
+
+The binaries are unsigned. Each release includes a `SHA256SUMS.txt`; don't trust the binary on its
+own -- either check the hash against what someone else you trust reports, or build your own copy
+from the same tag and compare: `git checkout <tag> && npm ci && npm run build:sea`. The source stays
+the primary trust anchor; the binary is a convenience on top of it, not a substitute for it.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
