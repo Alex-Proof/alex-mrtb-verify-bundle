@@ -794,7 +794,7 @@ trusting our CI at all, can rebuild the tagged commit themselves and check the r
 against the published, signed tarball.
 
 The release workflow (`.github/workflows/release.yml`) packages the tarball deterministically:
-Node (`20.20.2`) and Python (`3.12.8`) are pinned to exact patch versions, not floating majors;
+Node (`20.20.2`) and Python (`3.12.16`) are pinned to exact patch versions, not floating majors;
 `npm ci` installs from the committed lockfile; and the tarball itself is built with
 `tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@<commit time>"` piped through
 `gzip -n`, so file order, ownership, permissions bits from `cp`, and every timestamp are fixed to
