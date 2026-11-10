@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Package release tarball
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="alex-mrtb-verify-bundle-${tag}"
+          mkdir -p "/tmp/${name}"
+          cp -r dist verify.ts verify.py spec trust-anchor.json README.md LICENSE package.json "/tmp/${name}/"
+          tar -czf "${name}.tar.gz" -C /tmp "${name}"
+          sha256sum "${name}.tar.gz" > SHA256SUMS
+          echo "ASSET_NAME=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release tarball (keyless, GitHub OIDC -> public Rekor log)
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature "${ASSET_NAME}.sig" \
+            --output-certificate "${ASSET_NAME}.pem" \
+            "${ASSET_NAME}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.ASSET_NAME }}.sig
+            ${{ env.ASSET_NAME }}.pem
+            SHA256SUMS
+          generate_release_notes: true

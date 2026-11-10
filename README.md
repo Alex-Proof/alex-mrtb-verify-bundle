@@ -757,6 +757,33 @@ If one system controls both the work and every event in the bundle, an internall
 can still contain false claims. Stronger assurance requires an independent event source, runtime
 attestation, or reproducible re-execution.
 
+## Release signing
+
+Tagged releases (`.github/workflows/release.yml`, triggered on `v*.*.*` tags) are signed keyless
+with [cosign](https://docs.sigstore.dev/cosign/) via GitHub Actions OIDC -- no private key is
+stored anywhere, the signing identity is the workflow run itself, and the signature is logged to
+the public [Rekor](https://rekor.sigstore.dev) transparency log (same log used by
+`verifyRekorStapling()` above, different artifact). Each release carries the packaged tarball
+(`verify.ts`/`verify.py`/`dist/`/`spec/`/`trust-anchor.json`) plus its `.sig`/`.pem`/`SHA256SUMS`.
+
+Verify a downloaded release (needs `cosign` installed):
+
+```bash
+./verify-release.sh alex-mrtb-verify-bundle-v1.0.0.tar.gz alex-mrtb-verify-bundle-v1.0.0.tar.gz.sig alex-mrtb-verify-bundle-v1.0.0.tar.gz.pem
+```
+
+This checks the certificate's identity against exactly this repo's `release.yml` workflow on a
+tag ref -- a release asset re-uploaded by someone with push access, but not rebuilt by CI, fails
+this check even though it would still look like a normal GitHub release.
+
+**Deliberate limit, same bootstrap boundary as everywhere else in this repo:** this binds the
+release artifact to "this repo's CI built it", not to "this content is correct". A compromised
+release/CI workflow definition still signs, cleanly and verifiably, whatever it is told to build
+-- including a maliciously altered `verify.ts`. It is a DIFFERENT, additive guarantee from the
+human-approval signature above (which guards one specific constant against a compromised release
+process): this one guards against someone tampering with a release asset *after* CI produced it,
+not against a compromised CI itself.
+
 ## Live-Vorab-Check: `rights-gate-check.sh`
 
 ```bash
