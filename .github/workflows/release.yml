@@ -7,32 +7,46 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      asset_name: ${{ steps.package.outputs.asset_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "20.20.2"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.x"
+          python-version: "3.12.8"
       - run: npm ci
       - run: npm run build
       - run: npm test
 
-      - name: Package release tarball
+      - name: Package release tarball (deterministic)
+        id: package
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           name="alex-mrtb-verify-bundle-${tag}"
-          mkdir -p "/tmp/${name}"
-          cp -r dist verify.ts verify.py spec trust-anchor.json README.md LICENSE package.json "/tmp/${name}/"
-          tar -czf "${name}.tar.gz" -C /tmp "${name}"
+          # SOURCE_DATE_EPOCH pinned to the tagged commit's own commit time, so an
+          # independent rebuild of the same commit (see the "reproduce" job below,
+          # or anyone rebuilding locally) derives the identical value without
+          # needing it passed in -- not "now", which would differ between runs.
+          epoch="$(git log -1 --format=%ct)"
+          workdir="/tmp/${name}"
+          rm -rf "$workdir"
+          mkdir -p "$workdir"
+          cp -r dist verify.ts verify.py spec trust-anchor.json README.md LICENSE package.json "$workdir/"
+          find "$workdir" -print0 | xargs -0 touch -d "@${epoch}"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
+              -cf - -C /tmp "${name}" | gzip -n -9 > "${name}.tar.gz"
           sha256sum "${name}.tar.gz" > SHA256SUMS
           echo "ASSET_NAME=${name}.tar.gz" >> "$GITHUB_ENV"
+          echo "asset_name=${name}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
@@ -45,6 +59,11 @@ jobs:
             --output-certificate "${ASSET_NAME}.pem" \
             "${ASSET_NAME}"
 
+      - name: SLSA build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "${{ env.ASSET_NAME }}"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -54,3 +73,56 @@ jobs:
             ${{ env.ASSET_NAME }}.pem
             SHA256SUMS
           generate_release_notes: true
+
+      - name: Upload tarball for the independent rebuild-and-compare job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-tarball
+          path: ${{ env.ASSET_NAME }}
+          retention-days: 1
+
+  reproduce:
+    name: Independently rebuild the tag and byte-compare against the published tarball
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20.20.2"
+      - run: npm ci
+      - run: npm run build
+
+      - name: Rebuild the same tarball from source, independently of the release job
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="alex-mrtb-verify-bundle-${tag}"
+          epoch="$(git log -1 --format=%ct)"
+          workdir="/tmp/${name}"
+          rm -rf "$workdir"
+          mkdir -p "$workdir"
+          cp -r dist verify.ts verify.py spec trust-anchor.json README.md LICENSE package.json "$workdir/"
+          find "$workdir" -print0 | xargs -0 touch -d "@${epoch}"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
+              -cf - -C /tmp "${name}" | gzip -n -9 > "${name}.tar.gz"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-tarball
+          path: published
+
+      - name: Byte-compare the independent rebuild against the published, signed tarball
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="alex-mrtb-verify-bundle-${tag}"
+          rebuilt_hash="$(sha256sum "${name}.tar.gz" | cut -d' ' -f1)"
+          published_hash="$(sha256sum "published/${name}.tar.gz" | cut -d' ' -f1)"
+          echo "rebuilt:   ${rebuilt_hash}"
+          echo "published: ${published_hash}"
+          if [ "$rebuilt_hash" != "$published_hash" ]; then
+            echo "::error::Independent rebuild does NOT match the published, signed release tarball. The release asset is not reproducible from this source commit." >&2
+            exit 1
+          fi
+          echo "Independent rebuild is byte-identical to the published release tarball."

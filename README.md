@@ -784,6 +784,47 @@ human-approval signature above (which guards one specific constant against a com
 process): this one guards against someone tampering with a release asset *after* CI produced it,
 not against a compromised CI itself.
 
+### Reproducible builds
+
+Signing proves "this artifact came out of this repo's CI run." It does not prove "the code inside
+this artifact is what the public source actually says" -- a compromised `release.yml` would still
+sign, cleanly and verifiably, whatever it was told to build, including a maliciously altered
+`verify.ts`. Reproducible builds move that boundary one step further, not past it: anyone, without
+trusting our CI at all, can rebuild the tagged commit themselves and check the result byte-for-byte
+against the published, signed tarball.
+
+The release workflow (`.github/workflows/release.yml`) packages the tarball deterministically:
+Node (`20.20.2`) and Python (`3.12.8`) are pinned to exact patch versions, not floating majors;
+`npm ci` installs from the committed lockfile; and the tarball itself is built with
+`tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@<commit time>"` piped through
+`gzip -n`, so file order, ownership, permissions bits from `cp`, and every timestamp are fixed to
+the tagged commit's own commit time -- never "now", which would differ between any two builds of
+the same tag. Rebuilding the same tagged commit on a different machine, days apart, has been
+verified to produce a byte-identical tarball (identical `sha256sum`).
+
+Two independent, additive checks confirm this on every tagged release, not just as a one-off claim:
+
+- **SLSA provenance attestation** -- `actions/attest-build-provenance` records which exact source
+  commit, workflow file, and GitHub Actions run produced the tarball, signed and stored in GitHub's
+  attestation log. Verify a downloaded tarball against it with the `gh` CLI:
+
+  ```bash
+  gh attestation verify alex-mrtb-verify-bundle-v1.0.0.tar.gz --repo Alex-Proof/alex-mrtb-verify-bundle
+  ```
+
+- **Independent rebuild-and-compare CI job** -- a second job (`reproduce`) in the same workflow run
+  checks out the identical tag on its own, separate runner, rebuilds the tarball from source with
+  no input from the `release` job other than the git ref, and fails the workflow run if its
+  `sha256sum` does not exactly match the tarball the `release` job signed and published. This is the
+  actual proof; the attestation above records *what* was built, this job proves *that it is
+  rebuildable*.
+
+**Honest limit:** reproducibility proves artifact and source match -- it says nothing about whether
+the source itself is correct or free of an intentionally planted vulnerability. A malicious commit
+that passes `npm test` reproduces just as faithfully as a benign one. This closes the "artifact vs.
+source" gap, not the "is the source itself trustworthy" question -- that one still needs actual code
+review.
+
 ## Live-Vorab-Check: `rights-gate-check.sh`
 
 ```bash
