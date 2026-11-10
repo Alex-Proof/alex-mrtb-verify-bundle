@@ -184,6 +184,12 @@ export interface ObserverReceipt {
   received_at: string;
 }
 
+/** Mirrors adapters/observerRelay.server.ts (no shared import between server and this standalone verifier). */
+export interface ExecutionLogReceipt extends ObserverReceipt {
+  entry_hash: string;
+  sequence: number;
+}
+
 export interface ApprovalAttestationV1 {
   schema_version: "approval-attestation@1.0"; actor_id: string; approved_at: string; bundle_sha256: string;
   signer_key_id: string; public_key: string; signature: string;
@@ -1442,6 +1448,408 @@ interface DevTaskDiffEvidenceTraceEvent {
   diff_stat_sha256: string;
   diff_full_sha256: string | null;
   scope: "diff_stat_only" | "diff_stat_and_full";
+}
+
+interface GovernanceBlockedAttemptRef {
+  run_id?: string; reason: string;
+  // Governance layer, slice 3: additionally needed for buildEnforcementRecordsV1().
+  event_type?: string; observed_at: string;
+}
+
+interface GovernanceNetworkScopeViolationRef { dst_ip: string; dst_port: number; protocol: "tcp" | "udp"; observed_at: string; }
+
+// Governance layer, slice 3: mirrors core/enforcementRecord.server.ts (no shared import between
+// server and this standalone verifier). On any change there: make the identical change here
+// (REASON_CONTROL_TYPE/controlTypeFor/controlActiveProofFor/buildEnforcementRecordsV1).
+const ENFORCEMENT_RECORD_SCHEMA_VERSION = "enforcement-record@1.0" as const;
+type ControlType = "egress" | "secret" | "path" | "human_gate" | "privilege" | "self_replication";
+type EnforcementResult = "blocked" | "allowed" | "unknown";
+type EnforcementObservedBy = "observer" | "enforcer" | "agent_reported";
+
+interface EnforcementRecordV1 {
+  schema_version: typeof ENFORCEMENT_RECORD_SCHEMA_VERSION;
+  record_id: string;
+  constraint_id: string;
+  control_type: ControlType;
+  attempt: string;
+  result: EnforcementResult;
+  control_active_proof: string | null;
+  observed_by: EnforcementObservedBy;
+  ts: string;
+}
+
+const REASON_CONTROL_TYPE: Record<string, ControlType> = {
+  path_outside_allowlist: "path", symlink_outside_allowlist: "path", os_write_denied: "path",
+  secret_path_access_denied: "secret",
+  capability_not_bound: "privilege", tool_not_in_parent_capability_set: "privilege",
+  data_access_not_in_parent_capability_set: "privilege", runtime_exceeds_parent_budget: "privilege",
+  trifecta_violation: "privilege", trust_transition_not_allowed: "privilege",
+  change_gate_critical_must_open: "privilege", change_gate_rule_disable_denied: "privilege",
+  capability_mapping_missing: "privilege", collab_violation: "privilege",
+  write_despite_read_contract: "privilege", midrun_append_requires_change_gate: "privilege",
+  awaiting_human: "human_gate", destructive_target_requires_second_approval: "human_gate",
+  approval_target_changed: "human_gate",
+};
+
+function controlTypeForBlockedAttempt(attempt: GovernanceBlockedAttemptRef): ControlType | null {
+  if (attempt.event_type === "population_lock") return "self_replication";
+  return REASON_CONTROL_TYPE[attempt.reason] ?? null;
+}
+
+interface GovernanceSandboxProofRef { file_observation?: unknown; network_capture?: unknown }
+
+function controlActiveProofForEnforcement(
+  controlType: ControlType, sandbox: GovernanceSandboxProofRef | null | undefined,
+  receipts: ExecutionLogReceipt[] | undefined,
+): { ref: string | null; observedBy: EnforcementObservedBy } {
+  // Identical hashing to core/enforcementRecord.server.ts (sha256Json): raw JSON.stringify, NOT
+  // canonicalEvidenceJson -- both sides hash the same object, already read from the bundle file in
+  // identical key order; a diverging canonicalization algorithm would always produce a mismatch
+  // here, even for an unchanged bundle.
+  if (sandbox) {
+    if ((controlType === "path" || controlType === "self_replication") && sandbox.file_observation) {
+      return { ref: `sandbox_attestation.file_observation:sha256:${sha256(JSON.stringify(sandbox.file_observation))}`, observedBy: "enforcer" };
+    }
+    if (controlType === "egress" && sandbox.network_capture) {
+      return { ref: `sandbox_attestation.network_capture:sha256:${sha256(JSON.stringify(sandbox.network_capture))}`, observedBy: "enforcer" };
+    }
+  }
+  // Mirrors core/enforcementRecord.server.ts -- execution_log_receipts only counts for
+  // "privilege"/"secret" (those run without a sandbox).
+  if ((controlType === "privilege" || controlType === "secret") && receipts && receipts.length > 0) {
+    return { ref: `execution_log_receipts:sha256:${sha256(JSON.stringify(receipts))}`, observedBy: "observer" };
+  }
+  return { ref: null, observedBy: "agent_reported" };
+}
+
+function buildEnforcementRecordsV1(
+  constraintId: string, blockedAttempts: GovernanceBlockedAttemptRef[],
+  networkViolations: GovernanceNetworkScopeViolationRef[], sandbox: GovernanceSandboxProofRef | null | undefined,
+  delegationDenials: GovernanceBlockedAttemptRef[] = [],
+  executionLogReceipts: ExecutionLogReceipt[] = [],
+): EnforcementRecordV1[] {
+  const records: EnforcementRecordV1[] = [];
+  blockedAttempts.forEach((attempt, index) => {
+    const controlType = controlTypeForBlockedAttempt(attempt);
+    if (!controlType) return;
+    const proof = controlActiveProofForEnforcement(controlType, sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:blocked_attempt:${index}`,
+      constraint_id: constraintId, control_type: controlType, attempt: sha256(JSON.stringify(attempt)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: attempt.observed_at,
+    });
+  });
+  networkViolations.forEach((violation, index) => {
+    const proof = controlActiveProofForEnforcement("egress", sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:network_violation:${index}`,
+      constraint_id: constraintId, control_type: "egress", attempt: sha256(JSON.stringify(violation)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: violation.observed_at,
+    });
+  });
+  // Governance layer, slice 5: mirrors core/enforcementRecord.server.ts.
+  delegationDenials.forEach((attempt, index) => {
+    const controlType = controlTypeForBlockedAttempt(attempt);
+    if (!controlType) return;
+    const proof = controlActiveProofForEnforcement(controlType, sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:delegation_denial:${index}`,
+      constraint_id: constraintId, control_type: controlType, attempt: sha256(JSON.stringify(attempt)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: attempt.observed_at,
+    });
+  });
+  return records;
+}
+
+// Governance layer, slice 6: mirrors core/governanceIncident.server.ts -- same "no shared import" constraint.
+export const INCIDENT_RECORD_SCHEMA_VERSION = "incident-record@1.0" as const;
+export type IncidentType =
+  | "policy_violation" | "unauthorized_access_attempt" | "delegation_violation"
+  | "approval_bypass_attempt" | "sandbox_escape_attempt" | "unexpected_external_communication"
+  | "observer_failure" | "evidence_integrity_failure";
+export type IncidentEvidenceStatus = "complete" | "gap";
+export interface IncidentRecordV1 {
+  schema_version: typeof INCIDENT_RECORD_SCHEMA_VERSION; incident_id: string; incident_type: IncidentType;
+  tuple_ref: string; enforcement_refs: string[]; evidence_status: IncidentEvidenceStatus; detail: string; ts: string;
+}
+
+const CONTROL_TYPE_INCIDENT: Partial<Record<ControlType, IncidentType>> = {
+  egress: "unexpected_external_communication", secret: "unauthorized_access_attempt",
+  path: "sandbox_escape_attempt", self_replication: "sandbox_escape_attempt", human_gate: "approval_bypass_attempt",
+};
+
+/** Identical logic to buildIncidentRecordsV1() in core/governanceIncident.server.ts. */
+export function buildIncidentRecordsV1(tupleId: string, enforcement: EnforcementRecordV1[]): IncidentRecordV1[] {
+  const records: IncidentRecordV1[] = [];
+  enforcement.forEach((record, index) => {
+    let incidentType: IncidentType | undefined;
+    if (record.control_type === "privilege") {
+      incidentType = record.record_id.includes(":delegation_denial:") ? "delegation_violation" : "policy_violation";
+    } else {
+      incidentType = CONTROL_TYPE_INCIDENT[record.control_type];
+    }
+    if (!incidentType) return;
+    records.push({
+      schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:${index}`,
+      incident_type: incidentType, tuple_ref: tupleId, enforcement_refs: [record.record_id],
+      evidence_status: record.control_active_proof !== null ? "complete" : "gap",
+      detail: record.control_type, ts: record.ts,
+    });
+  });
+  return records;
+}
+
+/** Identical logic to detectObserverFailureIncident() in core/governanceIncident.server.ts. */
+export function detectObserverFailureIncident(
+  tupleId: string, input: { observerReceiptPresent: boolean; observerConfirmed: boolean | null },
+): IncidentRecordV1 | null {
+  if (!input.observerReceiptPresent || input.observerConfirmed !== false) return null;
+  return {
+    schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:observer_failure`,
+    incident_type: "observer_failure", tuple_ref: tupleId, enforcement_refs: [], evidence_status: "gap",
+    detail: "observer_receipt_present_but_cross_check_failed", ts: new Date().toISOString(),
+  };
+}
+
+/** Identical logic to detectEvidenceIntegrityFailureIncident() in core/governanceIncident.server.ts. */
+export function detectEvidenceIntegrityFailureIncident(
+  tupleId: string, input: { signatureOk: boolean; hashChainOk: boolean; reason?: string },
+): IncidentRecordV1 | null {
+  if (input.signatureOk && input.hashChainOk) return null;
+  return {
+    schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:evidence_integrity_failure`,
+    incident_type: "evidence_integrity_failure", tuple_ref: tupleId, enforcement_refs: [], evidence_status: "gap",
+    detail: input.reason ?? (!input.signatureOk ? "signature_invalid" : "hash_chain_invalid"), ts: new Date().toISOString(),
+  };
+}
+
+export type GovernanceRunStatus = "verified" | "partial" | "failed";
+export interface IncidentGateResult { max_status: GovernanceRunStatus; blocking_incidents: string[] }
+
+/** Identical logic to governanceIncidentGate() in core/governanceIncident.server.ts. */
+export function governanceIncidentGate(incidents: IncidentRecordV1[]): IncidentGateResult {
+  const blocking = incidents.filter((i) => i.incident_type === "observer_failure" || i.incident_type === "evidence_integrity_failure");
+  return { max_status: blocking.length > 0 ? "partial" : "verified", blocking_incidents: blocking.map((i) => i.incident_id) };
+}
+
+export interface EnforcementVerification { status: "enforced" | "partial" | "not_run"; evidence_gaps: string[] }
+
+/** Identical logic to verifyEnforcementRecords() in core/enforcementRecord.server.ts. */
+export function verifyEnforcementRecords(records: EnforcementRecordV1[]): EnforcementVerification {
+  if (records.length === 0) return { status: "not_run", evidence_gaps: [] };
+  const gaps = records.filter((r) => r.control_active_proof === null).map((r) => r.record_id);
+  return { status: gaps.length === 0 ? "enforced" : "partial", evidence_gaps: gaps };
+}
+
+// Governance layer, slice 5: mirrors core/governanceDelegation.server.ts -- same "no shared import"
+// constraint. Only the VALIDATION side (verifyDelegationChain/verifyDelegationLinkSignature/
+// verifyDelegationChainSignatures) -- this CLI verifier never builds/signs a delegation chain
+// itself, only core/governanceDelegation.server.ts (live, wired in host/agentLoop.server.ts) does.
+export const DELEGATION_LINK_SCHEMA_VERSION = "delegation-link@1.0" as const;
+export interface DelegationPartyV1 { kind: "principal" | "agent"; id: string }
+export interface DelegationScopeV1 { tool_manifest: string[]; data_access: string[]; max_runtime_ms: number }
+export interface DelegationSignatureV1 { algorithm: "ed25519"; public_key: string; signature: string }
+export interface DelegationLinkV1 {
+  schema_version: typeof DELEGATION_LINK_SCHEMA_VERSION;
+  delegation_id: string; parent: DelegationPartyV1; child: string; scope: DelegationScopeV1;
+  valid_from: string; valid_until: string; revocable: boolean; revoked_at: string | null;
+  inherited_constraints: ("tool_manifest" | "data_access" | "max_runtime_ms")[];
+  signature: DelegationSignatureV1 | null; parent_delegation_id: string | null;
+}
+
+export type DelegationChainStatus = "verified" | "failed" | "not_run";
+export interface DelegationChainVerification { status: DelegationChainStatus; reason?: string; link_id?: string }
+
+function isSubsetOf(child: readonly string[], parent: readonly string[]): boolean {
+  const parentSet = new Set(parent);
+  return child.every((value) => parentSet.has(value));
+}
+
+/** Identical logic to verifyDelegationChain() in core/governanceDelegation.server.ts. */
+export function verifyDelegationChain(chain: DelegationLinkV1[]): DelegationChainVerification {
+  if (chain.length === 0) return { status: "not_run" };
+  const first = chain[0];
+  if (first.parent.kind !== "principal") {
+    return { status: "failed", reason: "chain_does_not_start_at_principal", link_id: first.delegation_id };
+  }
+  for (let i = 1; i < chain.length; i++) {
+    const link = chain[i];
+    const parentLink = chain[i - 1];
+    if (link.parent.kind !== "agent" || link.parent.id !== parentLink.child) {
+      return { status: "failed", reason: "chain_broken", link_id: link.delegation_id };
+    }
+    if (link.parent_delegation_id !== parentLink.delegation_id) {
+      return { status: "failed", reason: "parent_delegation_id_mismatch", link_id: link.delegation_id };
+    }
+    if (!isSubsetOf(link.scope.tool_manifest, parentLink.scope.tool_manifest)
+      || !isSubsetOf(link.scope.data_access, parentLink.scope.data_access)
+      || link.scope.max_runtime_ms > parentLink.scope.max_runtime_ms) {
+      return { status: "failed", reason: "privilege_escalation", link_id: link.delegation_id };
+    }
+  }
+  return { status: "verified" };
+}
+
+export interface DelegationSignatureVerification { status: "verified" | "unsigned" | "invalid"; link_id: string }
+
+/** Identical logic to verifyDelegationLinkSignature() in core/governanceDelegation.server.ts. */
+export function verifyDelegationLinkSignature(link: DelegationLinkV1): DelegationSignatureVerification {
+  if (!link.signature) return { status: "unsigned", link_id: link.delegation_id };
+  const { signature, ...unsigned } = link;
+  const bytes = Buffer.from(canonical(unsigned), "utf8");
+  let ok: boolean;
+  try {
+    ok = verify(null, bytes, signature.public_key, Buffer.from(signature.signature, "base64"));
+  } catch {
+    ok = false;
+  }
+  return { status: ok ? "verified" : "invalid", link_id: link.delegation_id };
+}
+
+export interface DelegationChainSignatureVerification {
+  status: "verified" | "partial" | "unsigned" | "invalid"; unsigned_links: string[]; invalid_links: string[];
+}
+
+/** Identical logic to verifyDelegationChainSignatures() in core/governanceDelegation.server.ts. */
+export function verifyDelegationChainSignatures(chain: DelegationLinkV1[]): DelegationChainSignatureVerification {
+  const results = chain.map(verifyDelegationLinkSignature);
+  const invalid = results.filter((r) => r.status === "invalid").map((r) => r.link_id);
+  const unsigned = results.filter((r) => r.status === "unsigned").map((r) => r.link_id);
+  if (invalid.length > 0) return { status: "invalid", unsigned_links: unsigned, invalid_links: invalid };
+  if (chain.length > 0 && unsigned.length === chain.length) return { status: "unsigned", unsigned_links: unsigned, invalid_links: [] };
+  if (unsigned.length > 0) return { status: "partial", unsigned_links: unsigned, invalid_links: [] };
+  return { status: "verified", unsigned_links: [], invalid_links: [] };
+}
+
+// Trust-anchor pinning: verifyDelegationLinkSignature() only checks against the public_key
+// EMBEDDED in the link -- that proves record integrity, not WHO signed it. This function compares
+// the embedded key with the independently sourced human_approval trust anchor (delegation links are
+// signed with the approval key). Deliberately only in the CLI verifier (needs the live consensus
+// from crossCheckTrustAnchor() or a key passed in by the caller) and NOT mirrored into _verifier.py
+// (Python stays honestly "not checked"). No validity-window/revocation check: the published trust
+// anchor only contains the currently active key -- a rotated key therefore shows up as
+// not_pinned, not as disproven.
+export type DelegationSignerPinningStatus = "pinned" | "not_pinned" | "not_checked" | "not_applicable";
+export interface DelegationSignerPinningResult { status: DelegationSignerPinningStatus; unpinned_links: string[] }
+
+export function pinDelegationChainSigners(chain: DelegationLinkV1[], trustedApprovalPublicKey?: string | null): DelegationSignerPinningResult {
+  const signed = chain.filter((link) => link.signature);
+  if (signed.length === 0) return { status: "not_applicable", unpinned_links: [] };
+  if (!trustedApprovalPublicKey) return { status: "not_checked", unpinned_links: [] };
+  const trusted = trustedApprovalPublicKey.trim();
+  const unpinned = signed.filter((link) => link.signature!.public_key.trim() !== trusted).map((link) => link.delegation_id);
+  return unpinned.length > 0 ? { status: "not_pinned", unpinned_links: unpinned } : { status: "pinned", unpinned_links: [] };
+}
+
+// Policy-ref pinning: verifyBundleObject() only checks the Ed25519 signature -- that proves
+// policy_ref has been unchanged since signing, not that the claimed hash is actually the
+// active/approved policy version. core/governancePolicyVersion.server.ts:verifyPolicyRef() could
+// check that server-side against DB history, but is deliberately NOT mirrored here (needs live DB
+// access, see that file's header comment) -- this standalone verifier stays offline-runnable.
+// Instead, the identical pattern as pinDelegationChainSigners() above: comparison against a pinned
+// reference hash passed in independently by the caller (ALEX_VERIFY_PINNED_POLICY_HASH). Without
+// it the result honestly stays `not_checked` -- never `pinned` without an actual counter-check, and
+// (like delegation_signer_pinning) never influences the main verdict/claim ladder.
+export type PolicyRefPinningStatus = "pinned" | "not_pinned" | "not_checked" | "not_applicable";
+export interface PolicyRefPinningResult { status: PolicyRefPinningStatus }
+
+export function pinPolicyRef(
+  policyRef: { policy_id: string; version: number; hash: string } | null | undefined,
+  pinnedPolicyHash?: string | null,
+): PolicyRefPinningResult {
+  if (!policyRef) return { status: "not_applicable" };
+  if (!pinnedPolicyHash) return { status: "not_checked" };
+  return { status: policyRef.hash.trim() === pinnedPolicyHash.trim() ? "pinned" : "not_pinned" };
+}
+
+// Governance layer, slice 4: mirrors core/governanceProvenance.server.ts -- same "no shared
+// import" constraint. deriveLive... at the end of this block is deliberately NOT mirrored into
+// _verifier.py (same reason as verifyPolicyRef() above: the Python verifier never makes a fresh
+// network call), but lives here in TS because this CLI verifier already calls
+// crossCheckObserverReceipt() live (see main() below).
+export const GOVERNANCE_PROVENANCE_SCHEMA_VERSION = "governance-provenance@1.0" as const;
+export const GOVERNANCE_PROVENANCE_LABELS = [
+  "agent_reported", "observer_confirmed", "enforcer_recorded", "verifier_checked", "unobserved",
+] as const;
+export type GovernanceProvenanceLabel = typeof GOVERNANCE_PROVENANCE_LABELS[number];
+export const GOVERNANCE_PROVENANCE_STATEMENT = "Self-reported compliance is not independently verified compliance." as const;
+export const GOVERNANCE_PROVENANCE_FIELDS = [
+  "actor", "principal", "mandate", "authority", "constraints", "context",
+  "actions", "decisions", "approvals", "evidence_refs", "enforcement", "outcome",
+] as const;
+export type GovernanceProvenanceField = typeof GOVERNANCE_PROVENANCE_FIELDS[number];
+
+export interface GovernanceProvenanceEventV1 { ref: string; label: GovernanceProvenanceLabel }
+export interface GovernanceProvenanceV1 {
+  schema_version: typeof GOVERNANCE_PROVENANCE_SCHEMA_VERSION;
+  fields: Record<GovernanceProvenanceField, GovernanceProvenanceLabel>;
+  events: GovernanceProvenanceEventV1[];
+}
+
+function enforcementObservedByToLabel(observedBy: EnforcementObservedBy): GovernanceProvenanceLabel {
+  if (observedBy === "enforcer") return "enforcer_recorded";
+  if (observedBy === "observer") return "observer_confirmed";
+  return "agent_reported";
+}
+
+export interface GovernanceProvenanceInput {
+  decisionsCount: number; approvalsCount: number; enforcement: EnforcementRecordV1[]; policyRefPresent: boolean;
+}
+
+/** Identical logic to buildGovernanceProvenanceV1() in core/governanceProvenance.server.ts. */
+export function buildGovernanceProvenanceV1(input: GovernanceProvenanceInput): GovernanceProvenanceV1 {
+  const eventLabels = input.enforcement.map((record) => enforcementObservedByToLabel(record.observed_by));
+  const enforcementFieldLabel: GovernanceProvenanceLabel =
+    input.enforcement.length === 0 ? "unobserved"
+    : eventLabels.every((label) => label === "enforcer_recorded") ? "enforcer_recorded"
+    : eventLabels.every((label) => label === "observer_confirmed") ? "observer_confirmed"
+    : "agent_reported";
+  const fields: Record<GovernanceProvenanceField, GovernanceProvenanceLabel> = {
+    actor: "agent_reported", principal: "agent_reported", mandate: "agent_reported", authority: "agent_reported",
+    constraints: input.policyRefPresent ? "agent_reported" : "unobserved",
+    context: "agent_reported",
+    actions: input.decisionsCount === 0 ? "unobserved" : "verifier_checked",
+    decisions: input.decisionsCount === 0 ? "unobserved" : "verifier_checked",
+    approvals: input.approvalsCount === 0 ? "unobserved" : "agent_reported",
+    evidence_refs: "agent_reported",
+    enforcement: enforcementFieldLabel,
+    outcome: "agent_reported",
+  };
+  const events = input.enforcement.map((record, i) => ({ ref: record.record_id, label: eventLabels[i] }));
+  return { schema_version: GOVERNANCE_PROVENANCE_SCHEMA_VERSION, fields, events };
+}
+
+export interface GovernanceProvenanceSummaryV1 {
+  counts: Record<GovernanceProvenanceLabel, number>; total: number; statement: typeof GOVERNANCE_PROVENANCE_STATEMENT;
+}
+
+/** Identical logic to summarizeGovernanceProvenance() in core/governanceProvenance.server.ts. */
+export function summarizeGovernanceProvenance(provenance: GovernanceProvenanceV1): GovernanceProvenanceSummaryV1 {
+  const counts: Record<GovernanceProvenanceLabel, number> = {
+    agent_reported: 0, observer_confirmed: 0, enforcer_recorded: 0, verifier_checked: 0, unobserved: 0,
+  };
+  for (const label of Object.values(provenance.fields)) counts[label]++;
+  for (const evt of provenance.events) counts[evt.label]++;
+  const total = GOVERNANCE_PROVENANCE_FIELDS.length + provenance.events.length;
+  return { counts, total, statement: GOVERNANCE_PROVENANCE_STATEMENT };
+}
+
+export interface GovernanceProvenanceLiveInput { observerReceiptPresent: boolean; observerConfirmed: boolean | null }
+export interface GovernanceProvenanceLiveResult {
+  status: "consistent" | "discrepancy" | "not_checked"; upgraded_fields: GovernanceProvenanceField[]; discrepancies: string[];
+}
+
+/** Identical logic to deriveLiveGovernanceProvenanceV1() in core/governanceProvenance.server.ts. */
+export function deriveLiveGovernanceProvenanceV1(
+  provenance: GovernanceProvenanceV1, input: GovernanceProvenanceLiveInput,
+): GovernanceProvenanceLiveResult {
+  if (!input.observerReceiptPresent) return { status: "not_checked", upgraded_fields: [], discrepancies: [] };
+  if (input.observerConfirmed === null) return { status: "not_checked", upgraded_fields: [], discrepancies: [] };
+  if (input.observerConfirmed === false) {
+    return { status: "discrepancy", upgraded_fields: [], discrepancies: ["observer_receipt_present_but_cross_check_failed"] };
+  }
+  const upgraded = GOVERNANCE_PROVENANCE_FIELDS.filter((field) => provenance.fields[field] === "agent_reported");
+  return { status: "consistent", upgraded_fields: upgraded, discrepancies: [] };
 }
 
 const DEVTASK_DIFF_EVIDENCE_PREFIX = "devtask_diff_evidence:";

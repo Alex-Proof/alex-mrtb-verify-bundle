@@ -61,8 +61,50 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-10 (Rekor-Stapling: Mandatory-Cutoff + witnessed Grandfathering-Allowlist)
+**Zuletzt bearbeitet:** 2026-11-10 (Governance-Schicht Phase 1: Enforcement-Records, Delegation-Ketten, Policy-Ref-Pinning, Incident-Records, Provenance)
 **Von:** Alex-Proof
+
+Phase 1 von 4 eines abgestimmten Sync-Plans fuer die Governance-Schicht (Scheiben 1-7, privat
+gebaut 30.10.-09.11.2026) -- die unabhaengigen Fundament-Bausteine, die noch keine
+`GovernanceTupleV1`-Verdrahtung brauchen. Aus dem privaten `tools/verify-bundle/verify.ts`
+uebernommen, identische Logik/Feldnamen/reason-Strings:
+
+- **Enforcement Records** (`buildEnforcementRecordsV1`, intern/unexportiert wie privat;
+  `verifyEnforcementRecords` exportiert): leitet pro `blocked_attempt`/`network_violation`/
+  `delegation_denial` einen `EnforcementRecordV1` ab und ordnet ihm einen Control-Active-Beleg zu
+  (Sandbox-Attestation fuer `path`/`egress`/`self_replication`, `execution_log_receipts` fuer
+  `privilege`/`secret` ohne Sandbox). Vier-Zustaende-Verifikation ist Fail-closed: fehlt auch nur
+  EIN Beleg, bleibt der Status `partial`, nie `enforced`.
+- **Delegation Chains** (`verifyDelegationChain`, `verifyDelegationLinkSignature`,
+  `verifyDelegationChainSignatures`, `pinDelegationChainSigners`): prueft eine
+  Mensch-&gt;Agent-&gt;Agent-&gt;Tool-Kette auf echte Teilmengen-Verengung (nie erweiternd),
+  Ed25519-Signatur pro Glied, und optional Trust-Anchor-Pinning des eingebetteten Signierschluessels
+  gegen einen unabhaengig mitgegebenen Approval-Schluessel.
+- **Policy-Ref-Pinning** (`pinPolicyRef`): gleiches Pinning-Muster fuer den behaupteten
+  Policy-Hash -- bleibt ohne mitgegebenen Referenzwert ehrlich `not_checked`.
+- **Incident Records** (`buildIncidentRecordsV1`, `detectObserverFailureIncident`,
+  `detectEvidenceIntegrityFailureIncident`, `governanceIncidentGate`): leitet aus Enforcement-Records
+  Incident-Typen ab (`policy_violation`/`delegation_violation`/`sandbox_escape_attempt`/...),
+  erkennt Observer- und Evidence-Integritaets-Ausfaelle separat. Nur `observer_failure` und
+  `evidence_integrity_failure` blockieren den Gesamtstatus (`partial` statt `verified`).
+- **Governance Provenance** (`buildGovernanceProvenanceV1`, `summarizeGovernanceProvenance`,
+  `deriveLiveGovernanceProvenanceV1`): ordnet jedem der zwoelf Governance-Felder ein
+  Herkunfts-Label zu (`agent_reported`/`observer_confirmed`/`enforcer_recorded`/`verifier_checked`/
+  `unobserved`) -- macht explizit, welcher Teil einer Compliance-Behauptung tatsaechlich
+  unabhaengig bestaetigt wurde und welcher nur selbst gemeldet ist.
+
+`ExecutionLogReceipt` (Erweiterung von `ObserverReceipt` um `entry_hash`/`sequence`) als
+notwendige Typ-Abhaengigkeit mitgezogen. `test/governance-foundation.test.mjs` neu (22 Tests,
+node:test-Stil): deckt alle sechs Bloecke ueber die EXPORTIERTEN Funktionen ab, inkl. einer echten
+Ed25519-signierten Delegationskette (frisch generiertes Schluesselpaar, kein Mock). `verify.py`/
+`_verifier.py` bewusst NICHT angefasst (Python bleibt auf den Evidence-Bundle-Pfad beschraenkt,
+siehe Eintrag vom 29.10. unten). **Noch NICHT Teil dieser Phase** (folgende Phasen):
+`GovernanceTupleV1`/`validateGovernanceTupleV1`/`verifyGovernanceTuple` (Phase 2, braucht die
+`EvidenceBundle`-Erweiterung um `governance_tuple`), `computeGovernanceVerifierSummaryV1` +
+CLI-Verdrahtung (Phase 3), `IndependentVerifierAttestationV1`/`verifyIndependentVerifierBinding`
+(Phase 4).
+
+**Vorheriger Eintrag -- 2026-11-10 (Rekor-Stapling: Mandatory-Cutoff + witnessed Grandfathering-Allowlist):**
 
 Drei aufeinander aufbauende Haertungsschritte fuer die Revocation-Pruefung aus dem privaten
 `tools/verify-bundle/verify.ts` nachgezogen (eine externe SaSame/DM-Gegenkritik-Reihe, siehe
