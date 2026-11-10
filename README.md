@@ -61,9 +61,36 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-06 (Issues #5, #6, #8, #12 gefixt -- RFC3161-Token-Replay,
-Trust-Anchor-key_id/PEM-Luecke, Python-Parity fuer contract_snapshot und customer_summary)
+**Zuletzt bearbeitet:** 2026-11-10 (Rekor-Stapling: Mandatory-Cutoff + witnessed Grandfathering-Allowlist)
 **Von:** Alex-Proof
+
+Drei aufeinander aufbauende Haertungsschritte fuer die Revocation-Pruefung aus dem privaten
+`tools/verify-bundle/verify.ts` nachgezogen (eine externe SaSame/DM-Gegenkritik-Reihe, siehe
+Kommentare im Quelltext fuer die volle Herleitung):
+
+- **`REKOR_STAPLING_MANDATORY_SINCE`** (ab 2026-11-06): ein Revocation-Eintrag ohne
+  `rekor_tlog_entry` faellt nicht mehr still auf das selbst-attestierte `revoked_at` zurueck,
+  sondern wird in `checkSignerNotRevokedAfterEvidenceTime()` abgelehnt -- verhindert, dass ein
+  kompromittierter Schluessel sein eigenes `revoked_at` zurueckdatiert, um damit signierte Evidence
+  rueckwirkend zu entwerten.
+- **`revocationRecordContentHash()` + `PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST`**:
+  Grandfathering fuer die vier echten Revocations VOR dem Cutoff (04./14.09.2026-Key-Migrationen)
+  haengt jetzt an einer festen Inhalts-Hash-Allowlist statt am selbst behaupteten `revoked_at` --
+  sonst liesse sich ein heute neu gemintetet Record mit zurueckdatiertem `revoked_at` unbemerkt
+  als "alt genug" durchschleusen.
+- **`verifyRekorInclusionForArtifact()`** (aus `verifyRekorStapling()` extrahiert, identische
+  Kryptologik) **+ `PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY`**: die Allowlist
+  selbst ist kein nackter `Set<string>`-Konstante im Quelltext mehr, sondern ein kanonisches
+  Dokument, dessen Inhalts-Hash einmalig live gegen `rekor.sigstore.dev` geloggt wurde (`entry_uuid`
+  im Quelltext gepinnt) -- `checkPreCutoffGrandfatheredAllowlist()` prueft die Inclusion live nach,
+  fail-closed wenn der Eintrag fehlt. Loest nicht die Bootstrap-Grenze des gepinnten Werts selbst
+  (siehe Kommentar in `verify.ts`), macht die Liste aber oeffentlich nachpruefbar statt nur ein
+  unsichtbarer Diff in diesem Repo.
+
+`test/rekor-stapling.test.mjs` um die Cutoff-/Allowlist-Faelle ergaenzt (`revocationRecordContentHash`
+gegen den real gepinnten Hash gegengeprueft, `verifyRekorInclusionForArtifact()` gegen einen echten,
+live submittierten Rekor-Eintrag verifiziert). `verify.py`/`_verifier.py` bewusst NICHT angefasst --
+diese Pruefung bleibt eine dokumentierte TS-only-Luecke.
 
 Externe Kritik (GitHub-Issues #5/#6/#8/#12 in diesem Repo, Sparkz400/Nico Schuermann). Vier reale
 Luecken, alle direkt am Code gegengeprueft, keine Rueckmeldung des Melders zu den Fixes bisher:

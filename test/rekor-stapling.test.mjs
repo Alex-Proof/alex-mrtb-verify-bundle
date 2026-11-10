@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { generateKeyPairSync, sign, createHash } from "node:crypto";
-import { verifyRekorStapling, canonicalEvidenceJson, computeEffectiveRevokedAt, checkSignerNotRevokedAfterEvidenceTime } from "../dist/verify.js";
+import {
+  verifyRekorStapling, verifyRekorInclusionForArtifact, canonicalEvidenceJson, computeEffectiveRevokedAt,
+  checkSignerNotRevokedAfterEvidenceTime, revocationRecordContentHash,
+} from "../dist/verify.js";
 
 // Real, live access against the public Sigstore Rekor log -- deliberately NO mock. Every
 // stapleTestRecord() call creates a PERMANENT, public Rekor log entry (transparency logs are
@@ -79,6 +82,17 @@ test("verifyRekorStapling: a real, freshly submitted entry is confirmed live aga
 
   const result = await verifyRekorStapling(record);
   assert.equal(result.ok, true, `expected ok, got reason=${result.reason}`);
+
+  // 09.11.2026: verifyRekorInclusionForArtifact() is the generic core extracted out of
+  // verifyRekorStapling() (see PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST comment in verify.ts)
+  // -- it must hit the same real, already-submitted entry identically, otherwise the extraction
+  // is not behavior-preserving.
+  const { rekor_tlog_entry, ...attestedRecord } = record;
+  const genericResult = await verifyRekorInclusionForArtifact(
+    Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8"),
+    rekor_tlog_entry,
+  );
+  assert.deepEqual(genericResult, { ok: true });
 });
 
 test("verifyRekorStapling: rejects a record whose content was changed AFTER the Rekor submit", async () => {
@@ -213,30 +227,84 @@ test("checkSignerNotRevokedAfterEvidenceTime: rejects a record with a forged (un
   assert.match(result.reason, /^revocation_proof_invalid_/);
 });
 
-test("checkSignerNotRevokedAfterEvidenceTime: blocks evidence whose timestamp is after the effective revocation (no rekor_tlog_entry)", async () => {
-  const record = {
-    key_id: "revoked-key", public_key_pem: "irrelevant", valid_from: "2019-01-01T00:00:00.000Z",
-    revoked_at: "2026-01-01T00:00:00.000Z", reason: "test", replaced_by: null,
-  };
-  const consensus = {
-    purpose: "evidence_package", channels: [], agreed_key_id: "revoked-key",
+// 08.11.2026 (SaSame/DM follow-up: "What stops a pre-cutoff revocation being minted today?").
+// A bare record without rekor_tlog_entry no longer falls back to revoked_at at all -- it must
+// clear the witnessed PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST gate first. The one real,
+// pre-frozen pre-cutoff entry below (04.09.2026 KMS migration) is the only case that still can.
+const GRANDFATHERED_RECORD = {
+  key_id: "ed25519:469e3cfcd3ab01e3e46c746b8df45f8da8d830535e38ac4b2bc1c52a2872ea69",
+  public_key_pem: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEALhPfThYiCz7nmSsg0JqcAq4Y4XG56fa4oRX9ZT0bZic=\n-----END PUBLIC KEY-----\n",
+  valid_from: "2026-08-30T07:38:50.767Z",
+  revoked_at: "2026-09-04T20:04:42.445Z",
+  // Reason text must stay byte-identical to the original record (part of the pinned content hash
+  // below) -- NOT translated to English like the surrounding comments.
+  reason: "Geplante Migration auf Google Cloud KMS (Bauanleitung Evidence-Hardening 1.1), urspruenglich bei Alex-Souverrain nachtraeglich am 06.09.2026 rekonstruiert, 15.09.2026 read-only aus /opt/alex-os uebernommen.",
+  replaced_by: "ed25519:8ebca0b6c3f238df04a39dd17ad030c958577f4dc56b9038dc03f6eb87327a94",
+};
+
+function consensusWith(revocations, agreedKeyId) {
+  return {
+    purpose: "evidence_package", channels: [], agreed_key_id: agreedKeyId,
     agreed_public_key_pem: "irrelevant", agreement_count: 1, total_channels: 1, divergent: false,
-    revocations: [record],
+    revocations,
   };
-  const result = await checkSignerNotRevokedAfterEvidenceTime(consensus, "2026-06-01T00:00:00.000Z");
+}
+
+test("checkSignerNotRevokedAfterEvidenceTime: lets the grandfathered entry through the witnessed allowlist gate, but blocks evidence after the effective revocation", async () => {
+  const result = await checkSignerNotRevokedAfterEvidenceTime(
+    consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-10-01T00:00:00.000Z",
+  );
   assert.deepEqual(result, { ok: false, reason: "signer_key_revoked_before_evidence_time" });
 });
 
+test("checkSignerNotRevokedAfterEvidenceTime: lets evidence before the effective revocation through the witnessed allowlist gate", async () => {
+  const result = await checkSignerNotRevokedAfterEvidenceTime(
+    consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-08-31T00:00:00.000Z",
+  );
+  assert.deepEqual(result, { ok: true });
+});
+
 test("checkSignerNotRevokedAfterEvidenceTime: without an evidence timestamp, no time comparison is possible and it honestly lets it through", async () => {
+  const result = await checkSignerNotRevokedAfterEvidenceTime(
+    consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), null,
+  );
+  assert.deepEqual(result, { ok: true });
+});
+
+// 07.11.2026 (SaSame/DM follow-up: "revoked and never-logged look the same" as long as
+// submission is optional). Since REKOR_STAPLING_MANDATORY_SINCE, a missing rekor_tlog_entry may
+// no longer silently fall back to revoked_at.
+test("checkSignerNotRevokedAfterEvidenceTime: rejects a revocation after the stapling cutoff without a rekor_tlog_entry, instead of trusting revoked_at", async () => {
   const record = {
     key_id: "revoked-key", public_key_pem: "irrelevant", valid_from: "2019-01-01T00:00:00.000Z",
-    revoked_at: "2020-01-01T00:00:00.000Z", reason: "test", replaced_by: null,
+    revoked_at: "2026-11-07T00:00:00.000Z", reason: "test", replaced_by: null,
   };
-  const consensus = {
-    purpose: "evidence_package", channels: [], agreed_key_id: "revoked-key",
-    agreed_public_key_pem: "irrelevant", agreement_count: 1, total_channels: 1, divergent: false,
-    revocations: [record],
+  const result = await checkSignerNotRevokedAfterEvidenceTime(consensusWith([record], "revoked-key"), "2026-11-08T00:00:00.000Z");
+  assert.deepEqual(result, { ok: false, reason: "revocation_missing_rekor_proof_not_grandfathered" });
+});
+
+// 08.11.2026 (SaSame/DM follow-up on the 07.11. cutoff: "What stops a pre-cutoff revocation being
+// minted today?" -- exactly this case: a freshly minted record claims a revoked_at BEFORE the
+// cutoff but never actually existed in the real registry. The old date-based comparison let this
+// through; the hash-allowlist comparison rejects it because its content is not among the four
+// real, pre-frozen pre-cutoff entries -- independent of the claimed date.
+test("checkSignerNotRevokedAfterEvidenceTime: rejects a record freshly minted TODAY with a backdated revoked_at -- no more automatic grandfathering via the date field alone", async () => {
+  const record = {
+    key_id: "revoked-key", public_key_pem: "irrelevant", valid_from: "2019-01-01T00:00:00.000Z",
+    revoked_at: "2026-10-15T00:00:00.000Z", reason: "freshly minted, but with an old date", replaced_by: null,
   };
-  const result = await checkSignerNotRevokedAfterEvidenceTime(consensus, null);
+  const result = await checkSignerNotRevokedAfterEvidenceTime(consensusWith([record], "revoked-key"), "2026-11-08T00:00:00.000Z");
+  assert.deepEqual(result, { ok: false, reason: "revocation_missing_rekor_proof_not_grandfathered" });
+});
+
+// The four real pre-cutoff entries (2026-09-04/14 migrations, see PRE_ALEXCORE_CUTOVER_HISTORY in
+// the private evidenceBundle.server.ts) remain valid -- allowlist membership depends on their
+// exact content AND, since 09.11.2026, additionally on a real, live-checked Rekor inclusion proof
+// of the allowlist document itself (no longer just a bare hash check in the source).
+test("checkSignerNotRevokedAfterEvidenceTime: lets one of the four real, pre-frozen pre-cutoff entries through the witnessed allowlist gate (content hash + real Rekor inclusion proof)", async () => {
+  assert.equal(revocationRecordContentHash(GRANDFATHERED_RECORD), "947bf43969e8e1e0899169a1cc9260f868f0b74479b4b46a3d879506d1f4b684");
+  const result = await checkSignerNotRevokedAfterEvidenceTime(
+    consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-09-01T00:00:00.000Z",
+  );
   assert.deepEqual(result, { ok: true });
 });

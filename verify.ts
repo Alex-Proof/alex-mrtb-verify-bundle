@@ -2341,11 +2341,18 @@ const REKOR_BASE_URL = "https://rekor.sigstore.dev";
  *  later change to the body breaks (3) anyway. Only once (1)-(3) hold is it proven that this
  *  revocation REALLY existed at the claimed time -- not invented/backdated after the fact by a
  *  compromised backend. */
-export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{ ok: boolean; reason?: string }> {
-  const entry = record.rekor_tlog_entry;
-  if (!entry) return { ok: false, reason: "no_rekor_tlog_entry" };
+/** Generic core of steps (2)+(3) below: checks that Rekor's log entry `entry` REALLY hashes/logs
+ *  exactly `artifact` (arbitrary bytes, not only a RevocationRecordV1), and that the Merkle
+ *  inclusion + checkpoint signature are valid against Rekor's current, live-fetched public key.
+ *  Deliberately makes NO claim about authorship (who created the artifact) -- that is the
+ *  caller's job (step (1) below for RevocationRecordV1, set membership in the source itself for
+ *  PreCutoffGrandfatheredAllowlistV1). Extracted 09.11.2026 out of verifyRekorStapling() for
+ *  checkPreCutoffGrandfatheredAllowlist() below -- identical cryptography, different artifact. */
+export async function verifyRekorInclusionForArtifact(
+  artifact: Buffer,
+  entry: RekorTlogEntryV1,
+): Promise<{ ok: boolean; reason?: string }> {
   if (entry.schema_version !== "rekor-tlog-entry@1.0") return { ok: false, reason: "unsupported_rekor_tlog_entry_schema" };
-  if (!record.self_attestation_signature) return { ok: false, reason: "no_self_attestation_signature" };
 
   let body: any;
   try {
@@ -2355,20 +2362,6 @@ export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{
   }
   if (body.kind !== "hashedrekord") return { ok: false, reason: "rekor_body_unexpected_kind" };
 
-  // Step (1): self-attestation -- independent of Rekor, checkable with the public_key_pem
-  // already contained in the record itself.
-  const { rekor_tlog_entry: _omitEntry, self_attestation_signature: _omitSig, ...baseRecord } = record;
-  const baseArtifact = Buffer.from(canonicalEvidenceJson(baseRecord), "utf8");
-  // Ed25519/PureEdDSA requires algorithm=null for Node's crypto.verify() (unlike RSA/ECDSA, which
-  // always expect a hash-algorithm string) -- exactly why this does NOT use @sigstore/verify's
-  // higher-level Verifier/SignedEntity API (see type comment above).
-  if (!verify(null, baseArtifact, record.public_key_pem, Buffer.from(record.self_attestation_signature, "base64"))) {
-    return { ok: false, reason: "self_attestation_signature_invalid" };
-  }
-
-  // Step (2): Rekor hashed/logged exactly the record INCLUDING this self-attestation.
-  const { rekor_tlog_entry: _omit, ...attestedRecord } = record;
-  const artifact = Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8");
   const expectedHash = createHash("sha256").update(artifact).digest("hex");
   if (body.spec?.data?.hash?.algorithm !== "sha256" || body.spec.data.hash.value !== expectedHash) {
     return { ok: false, reason: "rekor_body_hash_mismatch" };
@@ -2413,6 +2406,29 @@ export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{
   return { ok: true };
 }
 
+export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{ ok: boolean; reason?: string }> {
+  const entry = record.rekor_tlog_entry;
+  if (!entry) return { ok: false, reason: "no_rekor_tlog_entry" };
+  if (!record.self_attestation_signature) return { ok: false, reason: "no_self_attestation_signature" };
+
+  // Step (1): self-attestation -- independent of Rekor, checkable with the public_key_pem
+  // already contained in the record itself.
+  const { rekor_tlog_entry: _omitEntry, self_attestation_signature: _omitSig, ...baseRecord } = record;
+  const baseArtifact = Buffer.from(canonicalEvidenceJson(baseRecord), "utf8");
+  // Ed25519/PureEdDSA requires algorithm=null for Node's crypto.verify() (unlike RSA/ECDSA, which
+  // always expect a hash-algorithm string) -- exactly why this does NOT use @sigstore/verify's
+  // higher-level Verifier/SignedEntity API (see type comment above).
+  if (!verify(null, baseArtifact, record.public_key_pem, Buffer.from(record.self_attestation_signature, "base64"))) {
+    return { ok: false, reason: "self_attestation_signature_invalid" };
+  }
+
+  // Steps (2)+(3): Rekor hashed/logged exactly the record INCLUDING this self-attestation, and
+  // Merkle inclusion + checkpoint signature are valid (real Sigstore cryptography, not
+  // reimplemented).
+  const { rekor_tlog_entry: _omit, ...attestedRecord } = record;
+  return verifyRekorInclusionForArtifact(Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8"), entry);
+}
+
 // 06.11.2026 (SaSame/DM challenge: revoked_at is self-attested -- a compromised key can forge/
 // backdate its own revoked_at to devalue evidence it signed itself). Rekor's integrated_time
 // cannot be chosen by the key holder -- as long as a real, inclusion-proof-valid rekor_tlog_entry
@@ -2427,6 +2443,137 @@ export function computeEffectiveRevokedAt(record: RevocationRecordV1): string | 
   if (!record.rekor_tlog_entry) return record.revoked_at;
   const rekorMs = record.rekor_tlog_entry.integrated_time * 1000;
   return new Date(Math.max(selfAttestedMs, rekorMs)).toISOString();
+}
+
+// 06.11.2026 (SaSame/DM challenge, see computeEffectiveRevokedAt() comment above: revoked_at is
+// self-attested -- a compromised key can forge/backdate it). Rekor's integrated_time cannot be
+// chosen by the key holder -- as long as a real, inclusion-proof-valid rekor_tlog_entry is
+// present, the maximum of the two times is the earliest point an attacker cannot undercut.
+// Without rekor_tlog_entry, revoked_at remains the only source -- deliberately left as-is for
+// revocations BEFORE the cutoff defined below (the ability to staple did not exist back then).
+// Since the cutoff, REKOR_STAPLING_MANDATORY_SINCE applies in
+// checkSignerNotRevokedAfterEvidenceTime() below: a missing rekor_tlog_entry is rejected there
+// instead of silently falling back to revoked_at.
+export const REKOR_STAPLING_MANDATORY_SINCE = "2026-11-06T00:00:00.000Z";
+
+/** Deterministic content hash of a RevocationRecordV1 WITHOUT rekor_tlog_entry/
+ *  self_attestation_signature -- the same canonicalization that the self-attestation itself signs
+ *  (see RevocationRecordV1 comment in the private core/mrtb/evidenceBundle.server.ts). Basis for
+ *  PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST below: membership depends on the exact content of
+ *  this one, already-existing record, not on a field inside it that the same record claims about
+ *  itself. */
+export function revocationRecordContentHash(record: RevocationRecordV1): string {
+  const { rekor_tlog_entry, self_attestation_signature, ...content } = record;
+  return sha256(canonicalEvidenceJson(content));
+}
+
+// 08.11.2026 (SaSame/DM follow-up on the 07.11. cutoff: "What stops a pre-cutoff revocation being
+// minted today?" -- NOTHING, that was the gap). The old comparison
+// `record.revoked_at >= REKOR_STAPLING_MANDATORY_SINCE` checks a field the record's own author
+// sets -- a freshly minted record today with a backdated revoked_at (e.g. October) slipped
+// unnoticed through the grandfather branch and could retroactively devalue real, later evidence.
+// Fix: grandfathering now depends on a FIXED allowlist of content hashes, not on a self-claimed
+// date.
+//
+// 09.11.2026 (SaSame/DM follow-up on the 08.11. fix: "If the four hashes ship as a constant
+// inside the verifier, the verifier binary is the trust anchor and a compromised release can add
+// a fifth"). Yesterday's bare set constant had exactly this problem: nobody outside a source diff
+// could see IF/WHEN a fifth hash was added. Fix: the allowlist is now itself a canonical document
+// (PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST below) that was logged once as its own
+// hashedrekord entry in Rekor (see the private scripts/stapleGrandfatheredRevocationAllowlist.mjs)
+// -- EXACTLY the same cryptography as verifyRekorInclusionForArtifact() above, just applied to a
+// new artifact instead of a single RevocationRecordV1. IMPORTANT, what this does NOT solve (no
+// demo theater): the verifier still pins EXACTLY ONE value in the source -- now the allowlist
+// document's Rekor entry_uuid/inclusion_proof instead of four raw hashes. Whoever can compromise
+// the verifier build can also swap this pinned entry -- the same bootstrap boundary as the pinned
+// Rekor root pubkey itself, not resolved by one more layer of indirection. The real gain: the list
+// is now publicly and verifiably timestamped at rekor.sigstore.dev, no longer just an invisible
+// diff in this repo. (The four real pre-cutoff entries stem from the 2026-09-04/14 key
+// migrations, see PRE_ALEXCORE_CUTOVER_HISTORY in the private evidenceBundle.server.ts -- all four
+// predate the Rekor stapling capability, so correctly have no rekor_tlog_entry OF THEIR OWN.)
+// EVERY other record -- regardless of its claimed revoked_at -- needs a valid rekor_tlog_entry
+// from now on, period.
+export interface GrandfatheredRevocationAllowlistV1 {
+  schema_version: "pre-cutoff-grandfathered-revocation-allowlist@1.0";
+  cutoff: string;
+  content_hashes: string[];
+  note: string;
+}
+
+export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST: GrandfatheredRevocationAllowlistV1 = {
+  schema_version: "pre-cutoff-grandfathered-revocation-allowlist@1.0",
+  cutoff: REKOR_STAPLING_MANDATORY_SINCE,
+  content_hashes: [
+    "947bf43969e8e1e0899169a1cc9260f868f0b74479b4b46a3d879506d1f4b684",
+    "b1d918f04f8017ac4c92c60a03054aa431c738c42849768492006cd68cc1af71",
+    "b9c0bbf0a6622f9c61f8b0ae6b6ba30a78b516931e95404dea8af77884438620",
+    "7f2e4db664d582a31c612fbbfdfc55ecf91b11554a30d6a17a2c7ccd455bdf96",
+  ],
+  // This exact text (German) is part of what Rekor witnessed below (the entry's inclusion proof
+  // binds the hash of this whole document, note field included) -- NOT translated to English like
+  // the surrounding comments, translating it would break PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY.
+  note: "Die vier Revocation-Eintraege aus den Key-Migrationen 04./14.09.2026 (Bauanleitung "
+    + "Evidence-Hardening 1.1), die am 08.11.2026 bereits live unter "
+    + "https://alexproof.de/.well-known/alex-pubkey.json standen, bevor Rekor-Stapling existierte. "
+    + "Abgeschlossene, nicht erweiterbare Liste -- jede angebliche weitere Vor-Cutoff-Nachtragung "
+    + "ist per Definition unecht, der Cutoff liegt in der Vergangenheit.",
+};
+
+/** entry_uuid + inclusion_proof of the ONE-TIME Rekor log entry for
+ *  PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST above (hashedrekord over
+ *  canonicalEvidenceJson(PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST)). `null` = not yet
+ *  submitted -- checkPreCutoffGrandfatheredAllowlist() below then rejects FAIL-CLOSED instead of
+ *  silently falling back to the old bare set check (no demo theater). Filled in once by the
+ *  private scripts/stapleGrandfatheredRevocationAllowlist.mjs after a real live submit against
+ *  rekor.sigstore.dev.
+ */
+export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY: RekorTlogEntryV1 | null = {
+  schema_version: "rekor-tlog-entry@1.0",
+  entry_uuid: "108e9186e8c5677a98c621f35bcc1cc3c0753605ec63f1275e276f6fcbb33c7279742bc0557b689b",
+  log_index: 3762397388,
+  log_id: "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+  integrated_time: 1794214362,
+  body: "eyJhcGlWZXJzaW9uIjoiMC4wLjEiLCJraW5kIjoiaGFzaGVkcmVrb3JkIiwic3BlYyI6eyJkYXRhIjp7Imhhc2giOnsiYWxnb3JpdGhtIjoic2hhMjU2IiwidmFsdWUiOiIxMjIzNWNmOWM3NjZjZjAyYmU4ZTBlMjkxODc4M2VlMTc1MDdiYmM3ZWJmM2U4ZTRkN2ExMzBhMGNmZDJlYTAwIn19LCJzaWduYXR1cmUiOnsiY29udGVudCI6Ik1FVUNJUUNIRHlUbzRwZmIyWHFvMFFCdHAyckNlZkZWWW5zaTVpUnVhTjVSSDZ1Z1hRSWdCRExWS3BlRWVla2FQL2E0dlZVNWNZc2Rtb0xmRkh1Sys5ZHFGS2Z3elVVPSIsInB1YmxpY0tleSI6eyJjb250ZW50IjoiTFMwdExTMUNSVWRKVGlCUVZVSk1TVU1nUzBWWkxTMHRMUzBLVFVacmQwVjNXVWhMYjFwSmVtb3dRMEZSV1VsTGIxcEplbW93UkVGUlkwUlJaMEZGWjFOdFRGQm5LMlZuTUdReFZFRnZjVk5GTWtoNGEzbFpWRXBNY1FwTlVuQTVNMmN5WldZeFJWcEhPRE53VVdwV1RVMU9aemxwTUZwcFRtOVdTbWgyU1hSRUsyRXllbk5RUlRoak1VRndjRzlCY0dSd1QwdDNQVDBLTFMwdExTMUZUa1FnVUZWQ1RFbERJRXRGV1MwdExTMHRDZz09In19fX0=",
+  inclusion_proof: {
+    log_index: 3640493126,
+    root_hash: "f3424501e0966b02718f567459b8235f566267a9ca9c2fcc8ee4432f6ff1939b",
+    tree_size: 3640493131,
+    hashes: [
+      "5266fd9f1085e1ff19513aa9d7720fa04fe50a6b71adb9e4be63f66b8246229b",
+      "8e73a5b040e452d462f14d890d454a028f38bc24bc560ddb6ef3c5218c1eb077",
+      "d0b7b570d08a5118ef81562402f89cad3b21a27219af259c288633902e2c37dc",
+      "8853f9ab4cd6dcc00a421d6728007ffc01b902023b6d148eaedaa0609e55c4e7",
+      "a149f350635e6d7b61cdb26298b8862e2c4438b9b311aa22b472669d4e989b28",
+      "1bece5a3b72146c6ed38012232870d48430cbae52108f8ce6cb12af297c107bf",
+      "318ee311bb0311992784c637c9ee28d733887b7b7c777a25ad18003c48a8d1a0",
+      "5eace4a2f72569a5392f8429af79612e2ff4f1a8a561cf1e59ab0e05c22e981c",
+      "1cff5d6bfcdff5fb96abe140a53930700cc53d6bb52a60d75e6026f40e6391af",
+      "4fd58d91e7ae847048661d46f2b163efaddcd5f7372f66a9cfa373fdc9c7490f",
+      "81a3519f61de2a76681dd56147633fa1bf5ce38adc1db96867b559b5a6cf8d95",
+      "34a2f6334f1935089142817fc096b88e0fe5dd0f65fb6ebc21206a032e0785e9",
+      "30981557d50213d5a8807bfe7bec3c359318878797f52aae2cc357935d81201c",
+      "b7a1171b79e3f6017f5aca9db92d724eaeb44e047887456e021e7689c5ad3db2",
+      "5cf7b1d68911dd07f55615ebfcb552a236a1f5c078475460bcafe646b99d58b6",
+      "4a58b19d2df806100efb2448d856863d23a1f55e8949534f7cb9756c7c6b7106",
+      "d436832b3ac234d061992758e6f163cfe369026c6661f60480109d3cbacc3f50",
+      "c47fc30ac78b1ebf5e2a8613f2ab0e4592bbcd5744198587b95b6c56b0fde706",
+    ],
+    checkpoint: "rekor.sigstore.dev - 1193050959916656506\n3640493131\n80JFAeCWawJxj1Z0WbgjX1ZiZ6nKnC/MjuRDL2/xk5s=\n\n— rekor.sigstore.dev wNI9ajBFAiEAoXGgMSFec7tV3IqCosUNeirEugZebkeeqNS+/YZrAPECIA53A6NCDX9zc6sUt7yzF20wKHSyvLbWF9LCnM7z6g0k\n",
+  },
+  submitted_at: "2026-11-09T08:52:44.286Z",
+};
+
+async function checkPreCutoffGrandfatheredAllowlist(contentHash: string): Promise<{ ok: boolean; reason?: string }> {
+  if (!PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST.content_hashes.includes(contentHash)) {
+    return { ok: false, reason: "revocation_missing_rekor_proof_not_grandfathered" };
+  }
+  if (!PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY) {
+    return { ok: false, reason: "grandfathered_allowlist_not_yet_witnessed_in_rekor" };
+  }
+  const artifact = Buffer.from(canonicalEvidenceJson(PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST), "utf8");
+  const staple = await verifyRekorInclusionForArtifact(artifact, PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY);
+  if (!staple.ok) return { ok: false, reason: `grandfathered_allowlist_proof_invalid_${staple.reason}` };
+  return { ok: true };
 }
 
 // 06.11.2026: uses computeEffectiveRevokedAt() above, only at the spot where a key is already
@@ -2446,6 +2593,9 @@ export async function checkSignerNotRevokedAfterEvidenceTime(
   if (record.rekor_tlog_entry) {
     const staple = await verifyRekorStapling(record);
     if (!staple.ok) return { ok: false, reason: `revocation_proof_invalid_${staple.reason}` };
+  } else {
+    const allowlisted = await checkPreCutoffGrandfatheredAllowlist(revocationRecordContentHash(record));
+    if (!allowlisted.ok) return allowlisted;
   }
   const effective = computeEffectiveRevokedAt(record);
   if (!effective || !evidenceTimeIso) return { ok: true };
