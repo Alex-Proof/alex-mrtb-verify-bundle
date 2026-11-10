@@ -61,8 +61,23 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-10 (Governance-Schicht Phase 1: Enforcement-Records, Delegation-Ketten, Policy-Ref-Pinning, Incident-Records, Provenance)
+**Zuletzt bearbeitet:** 2026-11-10 (Human-Approval-Signatur fuer die gegrandfatherte Revocation-Allowlist)
 **Von:** Alex-Proof
+
+Externer Pruefer (vierte Folgefrage in der Eskalationskette): "the verifier binary IS the trust
+floor -- a compromised release can add a fifth hash" auf
+`PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST`. `checkPreCutoffGrandfatheredAllowlist()` in
+`verify.ts` verlangt jetzt ZUSAETZLICH zum bestehenden Rekor-Inclusion-Proof eine Signatur des
+system-weiten Human-Approval-Signers (`crossCheckTrustAnchor("human_approval")`, kein neuer
+Anker) -- ein kompromittierter Release-/CI-Prozess kann diesen privaten Schluessel nicht
+besitzen. `approval_attestation` ist additiv und musste beim Rekor-Artefakt-Hash explizit
+ausgeschlossen werden, sonst haette das neue Feld den bereits permanenten Rekor-Eintrag vom
+09.11.2026 gebrochen. Die vier real gepinnten Pre-Cutoff-Hashes sowie der Rekor-Eintrag selbst
+sind unveraendert aus dem privaten `tools/verify-bundle/verify.ts` uebernommen (identische
+Logik/Feldnamen/reason-Strings). `test/rekor-stapling.test.mjs` 1:1 an die neue Gate-Reihenfolge
+angepasst, volle Suite 228/228 gruen vor dem Push. (Diese Haertung loest NICHT das darunterliegende
+Bootstrap-Problem -- wer den Verifier-Build selbst kompromittiert, kann weiterhin jeden gepinnten
+Wert austauschen, siehe Kommentar in `verify.ts`.)
 
 Phase 1 von 4 eines abgestimmten Sync-Plans fuer die Governance-Schicht (Scheiben 1-7, privat
 gebaut 30.10.-09.11.2026) -- die unabhaengigen Fundament-Bausteine, die noch keine

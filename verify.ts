@@ -2906,6 +2906,28 @@ export interface GrandfatheredRevocationAllowlistV1 {
   cutoff: string;
   content_hashes: string[];
   note: string;
+  // 2026-11-10 (third follow-up from the same reviewer: "the verifier binary IS the trust floor --
+  // a compromised release can add a fifth hash"). Additive to the Rekor proof above: a signature
+  // from the same human-approval signer already pinned system-wide for approval_attestation
+  // (crossCheckTrustAnchor("human_approval"), not a new anchor). A compromised release/CI process
+  // cannot hold this private key -- it would also have to compromise the human-approval signer,
+  // the same anchor the rest of the approval system already depends on. Does NOT solve the
+  // bootstrap problem itself (see comment above: unsolvable through one more layer of
+  // indirection) -- only closes that this ONE constant had its own, weaker bypass (bare source
+  // edit) that the rest of the system does not have. `null` = not yet signed --
+  // checkPreCutoffGrandfatheredAllowlist() then rejects fail-closed instead of silently falling
+  // back to the bare Rekor check alone.
+  approval_attestation: GrandfatheredAllowlistApprovalAttestationV1 | null;
+}
+
+export interface GrandfatheredAllowlistApprovalAttestationV1 {
+  schema_version: "grandfathered-allowlist-approval-attestation@1.0";
+  actor_id: string;
+  approved_at: string;
+  allowlist_sha256: string;
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
 }
 
 export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST: GrandfatheredRevocationAllowlistV1 = {
@@ -2925,6 +2947,20 @@ export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST: GrandfatheredRevocat
     + "https://alexproof.de/.well-known/alex-pubkey.json standen, bevor Rekor-Stapling existierte. "
     + "Abgeschlossene, nicht erweiterbare Liste -- jede angebliche weitere Vor-Cutoff-Nachtragung "
     + "ist per Definition unecht, der Cutoff liegt in der Vergangenheit.",
+  // 2026-11-10: signed once against the real production approval key (Andre's go-ahead obtained
+  // beforehand via AskUserQuestion -- human-gate satisfied, not auto-triggered). signer_key_id/
+  // public_key are identical to the system-wide human-approval signer (ensureApprovalKeypair() in
+  // the private evidenceBundle.server.ts), checked against crossCheckTrustAnchor("human_approval")
+  // in checkPreCutoffGrandfatheredAllowlist() below.
+  approval_attestation: {
+    schema_version: "grandfathered-allowlist-approval-attestation@1.0",
+    actor_id: "Andre",
+    approved_at: "2026-11-10T11:11:51.999Z",
+    allowlist_sha256: "36dd204d44d49583b54bd3d1ac5419c8f24c9b1abd6d3ffa2d818abdfaa97232",
+    signer_key_id: "ed25519:267a6a2a921b986b0a1db88022f44da947be353b4f93e3242c5b39c3f5708632",
+    public_key: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvVvU5ZqOk3yjII9iF6QpD0T+AWDWWTsr34P7R9eXvk=\n-----END PUBLIC KEY-----\n",
+    signature: "2fkrcI5KghRr5DU/WMEgULzhHIQnWEo4PlvPCptwd+gIitxe3w7lfE11djV9D48J2LqJwgFVtyyQuc0e6f4BAg==",
+  },
 };
 
 /** entry_uuid + inclusion_proof of the ONE-TIME Rekor log entry for
@@ -2978,9 +3014,32 @@ async function checkPreCutoffGrandfatheredAllowlist(contentHash: string): Promis
   if (!PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY) {
     return { ok: false, reason: "grandfathered_allowlist_not_yet_witnessed_in_rekor" };
   }
-  const artifact = Buffer.from(canonicalEvidenceJson(PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST), "utf8");
+  // approval_attestation is additive metadata, attached AFTER the already-permanent 2026-11-09
+  // Rekor entry -- that entry's artifact hash only binds schema_version/cutoff/content_hashes/
+  // note. Must be excluded here, otherwise any later-added attestation would break the
+  // already-logged entry (rekor_body_hash_mismatch).
+  const { approval_attestation: attestation, ...allowlistWithoutApproval } = PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST;
+  const artifact = Buffer.from(canonicalEvidenceJson(allowlistWithoutApproval), "utf8");
   const staple = await verifyRekorInclusionForArtifact(artifact, PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY);
   if (!staple.ok) return { ok: false, reason: `grandfathered_allowlist_proof_invalid_${staple.reason}` };
+  // 2026-11-10: second, independent anchor next to Rekor -- the same human-approval signer
+  // already pinned system-wide for approval_attestation. Looked up lazily (only here, not at
+  // every one of the 4 call sites unconditionally) because this branch is only reached for
+  // pre-cutoff revocations without their own rekor_tlog_entry.
+  if (!attestation) return { ok: false, reason: "grandfathered_allowlist_missing_approval_signature" };
+  const approvalConsensus = await crossCheckTrustAnchor("human_approval");
+  const trustedApprovalPublicKey = approvalConsensus.agreed_public_key_pem;
+  if (!trustedApprovalPublicKey) return { ok: false, reason: "grandfathered_allowlist_missing_approval_trust_anchor" };
+  const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = attestation;
+  if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) {
+    return { ok: false, reason: "grandfathered_allowlist_untrusted_approval_signer" };
+  }
+  if (approvalPayload.allowlist_sha256 !== sha256(JSON.stringify(allowlistWithoutApproval))) {
+    return { ok: false, reason: "grandfathered_allowlist_approval_hash_mismatch" };
+  }
+  if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) {
+    return { ok: false, reason: "grandfathered_allowlist_invalid_approval_signature" };
+  }
   return { ok: true };
 }
 

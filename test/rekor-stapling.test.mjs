@@ -250,14 +250,21 @@ function consensusWith(revocations, agreedKeyId) {
   };
 }
 
-test("checkSignerNotRevokedAfterEvidenceTime: lets the grandfathered entry through the witnessed allowlist gate, but blocks evidence after the effective revocation", async () => {
+// 2026-11-10 (fourth follow-up from the same reviewer: "the verifier binary IS the trust floor").
+// The allowlist now additionally needs a signature from the human-approval signer
+// (checkPreCutoffGrandfatheredAllowlist() in verify.ts) on top of the Rekor proof.
+// approval_attestation was signed once with the real production approval key (Andre's go-ahead
+// via AskUserQuestion, script run via SSH on the server, not an autonomous agent decision --
+// human-gate satisfied). These three tests again check the plain date-comparison logic BELOW the
+// new approval gate, same as before this hardening.
+test("checkSignerNotRevokedAfterEvidenceTime: lets the grandfathered entry through the now doubly-attested allowlist gate, but blocks evidence after the effective revocation", async () => {
   const result = await checkSignerNotRevokedAfterEvidenceTime(
     consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-10-01T00:00:00.000Z",
   );
   assert.deepEqual(result, { ok: false, reason: "signer_key_revoked_before_evidence_time" });
 });
 
-test("checkSignerNotRevokedAfterEvidenceTime: lets evidence before the effective revocation through the witnessed allowlist gate", async () => {
+test("checkSignerNotRevokedAfterEvidenceTime: lets evidence before the effective revocation through the now doubly-attested allowlist gate", async () => {
   const result = await checkSignerNotRevokedAfterEvidenceTime(
     consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-08-31T00:00:00.000Z",
   );
@@ -301,7 +308,7 @@ test("checkSignerNotRevokedAfterEvidenceTime: rejects a record freshly minted TO
 // the private evidenceBundle.server.ts) remain valid -- allowlist membership depends on their
 // exact content AND, since 09.11.2026, additionally on a real, live-checked Rekor inclusion proof
 // of the allowlist document itself (no longer just a bare hash check in the source).
-test("checkSignerNotRevokedAfterEvidenceTime: lets one of the four real, pre-frozen pre-cutoff entries through the witnessed allowlist gate (content hash + real Rekor inclusion proof)", async () => {
+test("checkSignerNotRevokedAfterEvidenceTime: lets one of the four real, pre-frozen pre-cutoff entries through the doubly-attested allowlist gate (content hash + Rekor inclusion proof + human-approval signature)", async () => {
   assert.equal(revocationRecordContentHash(GRANDFATHERED_RECORD), "947bf43969e8e1e0899169a1cc9260f868f0b74479b4b46a3d879506d1f4b684");
   const result = await checkSignerNotRevokedAfterEvidenceTime(
     consensusWith([GRANDFATHERED_RECORD], GRANDFATHERED_RECORD.key_id), "2026-09-01T00:00:00.000Z",
