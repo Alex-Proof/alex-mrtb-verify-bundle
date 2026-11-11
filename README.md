@@ -766,23 +766,33 @@ the public [Rekor](https://rekor.sigstore.dev) transparency log (same log used b
 `verifyRekorStapling()` above, different artifact). Each release carries the packaged tarball
 (`verify.ts`/`verify.py`/`dist/`/`spec/`/`trust-anchor.json`) plus its `.sig`/`.pem`/`SHA256SUMS`.
 
-Verify a downloaded release (needs `cosign` installed):
+Verify a downloaded release (needs `cosign` and `gh` installed):
 
 ```bash
 ./verify-release.sh alex-mrtb-verify-bundle-v1.0.0.tar.gz alex-mrtb-verify-bundle-v1.0.0.tar.gz.sig alex-mrtb-verify-bundle-v1.0.0.tar.gz.pem
 ```
 
-This checks the certificate's identity against exactly this repo's `release.yml` workflow on a
-tag ref -- a release asset re-uploaded by someone with push access, but not rebuilt by CI, fails
-this check even though it would still look like a normal GitHub release.
+This runs two independent, additive checks, not one:
 
-**Deliberate limit, same bootstrap boundary as everywhere else in this repo:** this binds the
-release artifact to "this repo's CI built it", not to "this content is correct". A compromised
-release/CI workflow definition still signs, cleanly and verifiably, whatever it is told to build
--- including a maliciously altered `verify.ts`. It is a DIFFERENT, additive guarantee from the
-human-approval signature above (which guards one specific constant against a compromised release
-process): this one guards against someone tampering with a release asset *after* CI produced it,
-not against a compromised CI itself.
+1. `cosign verify-blob` checks the certificate's identity against exactly this repo's
+   `release.yml` workflow on a tag ref -- a release asset re-uploaded by someone with push access,
+   but not rebuilt by CI, fails this check even though it would still look like a normal GitHub
+   release. This binds the artifact to "this repo's CI built it", not to "this content is
+   correct" -- a compromised release/CI workflow definition still signs, cleanly and verifiably,
+   whatever it is told to build, including a maliciously altered `verify.ts`. It pins the
+   **workflow's identity**, not any specific source commit.
+2. `gh attestation verify` checks the SLSA build provenance attestation for this exact artifact
+   digest (see "Reproducible builds" below) -- which source commit and build recipe produced it.
+   This pins the **artifact digest to that commit**, which step 1 alone does not: a swapped
+   `release.yml` that still reports the right workflow identity would still fail this check,
+   because the provenance predicate's subject digest and recorded commit would no longer match
+   what the attacker actually built.
+
+Together they are a DIFFERENT, additive guarantee from the human-approval signature above (which
+guards one specific constant against a compromised release process): these two guard against
+someone tampering with a release asset *after* CI produced it, and against the workflow identity
+being satisfied without the provenance-recorded commit actually matching -- not against the
+source commit itself being malicious, which still needs code review.
 
 ### Reproducible builds
 
