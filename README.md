@@ -61,8 +61,19 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-10 (Human-Approval-Signatur fuer die gegrandfatherte Revocation-Allowlist)
+**Zuletzt bearbeitet:** 2026-11-13 (signierter Branch-Protection-Snapshot pro Release)
 **Von:** Alex-Proof
+
+Externer Pruefer (Bluesky) auf `critical-file-cooldown.yml`: "protection and the cooldown are live
+GitHub state, not evidence -- a digest built in a window when the rules were off verifies exactly
+like one built with them on." Richtige Frage. Jeder getaggte Release liefert jetzt zusaetzlich eine
+eigenstaendig signierte `*.protection-snapshot.json` (gleicher cosign/OIDC-Flow wie der Tarball,
+eigene Signatur) mit dem tatsaechlichen `branches/main/protection`-Zustand zum Build-Zeitpunkt
+(`enforce_admins`, `required_signatures`, `required_status_checks`-Kontexte, geforderte Review-
+Anzahl). Was das NICHT beweist -- Momentaufnahme statt Verlauf, 24h-Cooldown ist Sichtbarkeit statt
+zweite pruefende Person, diese CI kann die eigene Integritaet nicht bezeugen -- steht ausfuehrlich
+und unverkuerzt in [`TRUST-BOUNDARY.md`](TRUST-BOUNDARY.md#what-a-release-does-not-prove-branch-protection-cooldown-and-the-limits-of-ci-self-attestation).
+Kein neuer Trust-Anchor, kein neues Signaturschema.
 
 Externer Pruefer (vierte Folgefrage in der Eskalationskette): "the verifier binary IS the trust
 floor -- a compromised release can add a fifth hash" auf
