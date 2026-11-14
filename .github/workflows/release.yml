@@ -1,5 +1,81 @@
 name: release
 
+<<<<<<< HEAD
+# Baut bei jedem Versions-Tag (v*) eigenstaendige, lokal lauffaehige Programmdateien fuer
+# Windows/macOS/Linux aus genau diesem Commit und veroeffentlicht sie mit SHA-256-Checksummen als
+# GitHub Release. Ersetzt NICHT den Quellcode als primaere Vertrauensquelle (siehe README
+# "Prebuilt binaries") -- jeder kann die Checksumme gegen den eigenen Build aus demselben Tag
+# nachrechnen (npm run build:sea), statt der Binary blind zu vertrauen.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: alex-verify-linux-x64
+          - os: macos-latest
+            artifact: alex-verify-macos-arm64
+          - os: windows-latest
+            artifact: alex-verify-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.9"
+      - run: npm ci
+      - run: npm run build --silent
+      - run: node scripts/build-sea.mjs ${{ matrix.artifact }}
+      - name: sha256sum
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          fi
+          cat "${{ matrix.artifact }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-binaries
+          merge-multiple: true
+      - name: SHA256SUMS.txt
+        run: cat dist-binaries/*.sha256 > dist-binaries/SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-binaries/alex-verify-linux-x64
+            dist-binaries/alex-verify-macos-arm64
+            dist-binaries/alex-verify-windows-x64.exe
+            dist-binaries/SHA256SUMS.txt
+          body: |
+            Eigenstaendige, lokal lauffaehige Programmdateien fuer evidence-bundle/passport-card/
+            challenge-response-Pruefung (verdict-artifact-Pruefung braucht weiterhin den Quell-
+            Checkout, siehe README "Prebuilt binaries"). Unsigniert -- Checksumme in
+            SHA256SUMS.txt gegen den eigenen Build aus demselben Tag (npm ci && npm run build:sea)
+            nachrechnen, nicht blind vertrauen.
+=======
 on:
   push:
     tags: ["v*.*.*"]
@@ -136,3 +212,4 @@ jobs:
             exit 1
           fi
           echo "Independent rebuild is byte-identical to the published release tarball."
+>>>>>>> origin/main
