@@ -783,6 +783,16 @@ Verify a downloaded release (needs `cosign` and `gh` installed):
 ./verify-release.sh alex-mrtb-verify-bundle-v1.0.0.tar.gz alex-mrtb-verify-bundle-v1.0.0.tar.gz.sig alex-mrtb-verify-bundle-v1.0.0.tar.gz.pem
 ```
 
+Optionally, pass the release's `*.protection-snapshot.json` + its `.sig`/`.pem` as three more
+arguments to also check the signed build-time branch-protection attestation (see
+[`TRUST-BOUNDARY.md`](TRUST-BOUNDARY.md#what-a-release-does-not-prove-branch-protection-cooldown-and-the-limits-of-ci-self-attestation)
+for what this does and does not prove):
+
+```bash
+./verify-release.sh alex-mrtb-verify-bundle-v1.0.0.tar.gz alex-mrtb-verify-bundle-v1.0.0.tar.gz.sig alex-mrtb-verify-bundle-v1.0.0.tar.gz.pem \
+  alex-mrtb-verify-bundle-v1.0.0.protection-snapshot.json alex-mrtb-verify-bundle-v1.0.0.protection-snapshot.json.sig alex-mrtb-verify-bundle-v1.0.0.protection-snapshot.json.pem
+```
+
 This runs two independent, additive checks, not one:
 
 1. `cosign verify-blob` checks the certificate's identity against exactly this repo's
