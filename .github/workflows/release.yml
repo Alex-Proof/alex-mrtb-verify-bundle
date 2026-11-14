@@ -8,6 +8,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  administration: read
 
 jobs:
   release:
@@ -25,6 +26,50 @@ jobs:
           git config gpg.format ssh
           git config gpg.ssh.allowedSignersFile "${GITHUB_WORKSPACE}/.github/allowed_signers"
           git verify-tag "${GITHUB_REF_NAME}"
+
+      # This is a snapshot, not a history: it captures the protection rules as the
+      # GitHub API reports them AT BUILD TIME, not what they were while the commits
+      # being released were authored. A release built in a window where protection
+      # was briefly off looks, for every OTHER field on this bundle, identical to one
+      # built under full protection -- this step does not close that gap, it only
+      # stops hiding it. See TRUST-BOUNDARY.md for what this snapshot does and does
+      # not prove.
+      - name: Capture repository branch-protection state (build-time snapshot)
+        id: protection_snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          tag="${GITHUB_REF_NAME}"
+          name="alex-mrtb-verify-bundle-${tag}"
+          snapshot_file="${name}.protection-snapshot.json"
+          captured_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          protection="$(gh api "repos/${repo}/branches/main/protection")"
+          jq -n \
+            --arg schema "alex-mrtb-verify-bundle/protection-snapshot@1" \
+            --arg captured_at "$captured_at" \
+            --arg repository "$repo" \
+            --arg branch "main" \
+            --arg tag "$tag" \
+            --arg commit_sha "${{ github.sha }}" \
+            --argjson protection "$protection" \
+            '{
+              schema: $schema,
+              captured_at: $captured_at,
+              repository: $repository,
+              branch: $branch,
+              tag: $tag,
+              commit_sha: $commit_sha,
+              enforce_admins: $protection.enforce_admins.enabled,
+              required_signatures_enabled: $protection.required_signatures.enabled,
+              required_status_checks_strict: $protection.required_status_checks.strict,
+              required_status_checks_contexts: $protection.required_status_checks.contexts,
+              required_pull_request_reviews_required_approving_review_count:
+                ($protection.required_pull_request_reviews.required_approving_review_count // 0)
+            }' > "$snapshot_file"
+          cat "$snapshot_file"
+          echo "SNAPSHOT_NAME=${snapshot_file}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -54,7 +99,7 @@ jobs:
           find "$workdir" -print0 | xargs -0 touch -d "@${epoch}"
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
               -cf - -C /tmp "${name}" | gzip -n -9 > "${name}.tar.gz"
-          sha256sum "${name}.tar.gz" > SHA256SUMS
+          sha256sum "${name}.tar.gz" "${SNAPSHOT_NAME}" > SHA256SUMS
           echo "ASSET_NAME=${name}.tar.gz" >> "$GITHUB_ENV"
           echo "asset_name=${name}.tar.gz" >> "$GITHUB_OUTPUT"
 
@@ -69,10 +114,23 @@ jobs:
             --output-certificate "${ASSET_NAME}.pem" \
             "${ASSET_NAME}"
 
+      # Same cosign OIDC flow as the tarball above, its own signature -- the
+      # snapshot is not folded into the tarball's signature, so it can be
+      # verified (or found missing) on its own.
+      - name: Sign protection snapshot (keyless, GitHub OIDC -> public Rekor log)
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature "${SNAPSHOT_NAME}.sig" \
+            --output-certificate "${SNAPSHOT_NAME}.pem" \
+            "${SNAPSHOT_NAME}"
+
       - name: SLSA build provenance attestation
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: "${{ env.ASSET_NAME }}"
+          subject-path: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.SNAPSHOT_NAME }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -81,6 +139,9 @@ jobs:
             ${{ env.ASSET_NAME }}
             ${{ env.ASSET_NAME }}.sig
             ${{ env.ASSET_NAME }}.pem
+            ${{ env.SNAPSHOT_NAME }}
+            ${{ env.SNAPSHOT_NAME }}.sig
+            ${{ env.SNAPSHOT_NAME }}.pem
             SHA256SUMS
           generate_release_notes: true
 
