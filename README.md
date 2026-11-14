@@ -61,9 +61,93 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
-**Zuletzt bearbeitet:** 2026-11-06 (Issues #5, #6, #8, #12 gefixt -- RFC3161-Token-Replay,
-Trust-Anchor-key_id/PEM-Luecke, Python-Parity fuer contract_snapshot und customer_summary)
+**Zuletzt bearbeitet:** 2026-11-10 (Human-Approval-Signatur fuer die gegrandfatherte Revocation-Allowlist)
 **Von:** Alex-Proof
+
+Externer Pruefer (vierte Folgefrage in der Eskalationskette): "the verifier binary IS the trust
+floor -- a compromised release can add a fifth hash" auf
+`PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST`. `checkPreCutoffGrandfatheredAllowlist()` in
+`verify.ts` verlangt jetzt ZUSAETZLICH zum bestehenden Rekor-Inclusion-Proof eine Signatur des
+system-weiten Human-Approval-Signers (`crossCheckTrustAnchor("human_approval")`, kein neuer
+Anker) -- ein kompromittierter Release-/CI-Prozess kann diesen privaten Schluessel nicht
+besitzen. `approval_attestation` ist additiv und musste beim Rekor-Artefakt-Hash explizit
+ausgeschlossen werden, sonst haette das neue Feld den bereits permanenten Rekor-Eintrag vom
+09.11.2026 gebrochen. Die vier real gepinnten Pre-Cutoff-Hashes sowie der Rekor-Eintrag selbst
+sind unveraendert aus dem privaten `tools/verify-bundle/verify.ts` uebernommen (identische
+Logik/Feldnamen/reason-Strings). `test/rekor-stapling.test.mjs` 1:1 an die neue Gate-Reihenfolge
+angepasst, volle Suite 228/228 gruen vor dem Push. (Diese Haertung loest NICHT das darunterliegende
+Bootstrap-Problem -- wer den Verifier-Build selbst kompromittiert, kann weiterhin jeden gepinnten
+Wert austauschen, siehe Kommentar in `verify.ts`.)
+
+Phase 1 von 4 eines abgestimmten Sync-Plans fuer die Governance-Schicht (Scheiben 1-7, privat
+gebaut 30.10.-09.11.2026) -- die unabhaengigen Fundament-Bausteine, die noch keine
+`GovernanceTupleV1`-Verdrahtung brauchen. Aus dem privaten `tools/verify-bundle/verify.ts`
+uebernommen, identische Logik/Feldnamen/reason-Strings:
+
+- **Enforcement Records** (`buildEnforcementRecordsV1`, intern/unexportiert wie privat;
+  `verifyEnforcementRecords` exportiert): leitet pro `blocked_attempt`/`network_violation`/
+  `delegation_denial` einen `EnforcementRecordV1` ab und ordnet ihm einen Control-Active-Beleg zu
+  (Sandbox-Attestation fuer `path`/`egress`/`self_replication`, `execution_log_receipts` fuer
+  `privilege`/`secret` ohne Sandbox). Vier-Zustaende-Verifikation ist Fail-closed: fehlt auch nur
+  EIN Beleg, bleibt der Status `partial`, nie `enforced`.
+- **Delegation Chains** (`verifyDelegationChain`, `verifyDelegationLinkSignature`,
+  `verifyDelegationChainSignatures`, `pinDelegationChainSigners`): prueft eine
+  Mensch-&gt;Agent-&gt;Agent-&gt;Tool-Kette auf echte Teilmengen-Verengung (nie erweiternd),
+  Ed25519-Signatur pro Glied, und optional Trust-Anchor-Pinning des eingebetteten Signierschluessels
+  gegen einen unabhaengig mitgegebenen Approval-Schluessel.
+- **Policy-Ref-Pinning** (`pinPolicyRef`): gleiches Pinning-Muster fuer den behaupteten
+  Policy-Hash -- bleibt ohne mitgegebenen Referenzwert ehrlich `not_checked`.
+- **Incident Records** (`buildIncidentRecordsV1`, `detectObserverFailureIncident`,
+  `detectEvidenceIntegrityFailureIncident`, `governanceIncidentGate`): leitet aus Enforcement-Records
+  Incident-Typen ab (`policy_violation`/`delegation_violation`/`sandbox_escape_attempt`/...),
+  erkennt Observer- und Evidence-Integritaets-Ausfaelle separat. Nur `observer_failure` und
+  `evidence_integrity_failure` blockieren den Gesamtstatus (`partial` statt `verified`).
+- **Governance Provenance** (`buildGovernanceProvenanceV1`, `summarizeGovernanceProvenance`,
+  `deriveLiveGovernanceProvenanceV1`): ordnet jedem der zwoelf Governance-Felder ein
+  Herkunfts-Label zu (`agent_reported`/`observer_confirmed`/`enforcer_recorded`/`verifier_checked`/
+  `unobserved`) -- macht explizit, welcher Teil einer Compliance-Behauptung tatsaechlich
+  unabhaengig bestaetigt wurde und welcher nur selbst gemeldet ist.
+
+`ExecutionLogReceipt` (Erweiterung von `ObserverReceipt` um `entry_hash`/`sequence`) als
+notwendige Typ-Abhaengigkeit mitgezogen. `test/governance-foundation.test.mjs` neu (22 Tests,
+node:test-Stil): deckt alle sechs Bloecke ueber die EXPORTIERTEN Funktionen ab, inkl. einer echten
+Ed25519-signierten Delegationskette (frisch generiertes Schluesselpaar, kein Mock). `verify.py`/
+`_verifier.py` bewusst NICHT angefasst (Python bleibt auf den Evidence-Bundle-Pfad beschraenkt,
+siehe Eintrag vom 29.10. unten). **Noch NICHT Teil dieser Phase** (folgende Phasen):
+`GovernanceTupleV1`/`validateGovernanceTupleV1`/`verifyGovernanceTuple` (Phase 2, braucht die
+`EvidenceBundle`-Erweiterung um `governance_tuple`), `computeGovernanceVerifierSummaryV1` +
+CLI-Verdrahtung (Phase 3), `IndependentVerifierAttestationV1`/`verifyIndependentVerifierBinding`
+(Phase 4).
+
+**Vorheriger Eintrag -- 2026-11-10 (Rekor-Stapling: Mandatory-Cutoff + witnessed Grandfathering-Allowlist):**
+
+Drei aufeinander aufbauende Haertungsschritte fuer die Revocation-Pruefung aus dem privaten
+`tools/verify-bundle/verify.ts` nachgezogen (eine externe SaSame/DM-Gegenkritik-Reihe, siehe
+Kommentare im Quelltext fuer die volle Herleitung):
+
+- **`REKOR_STAPLING_MANDATORY_SINCE`** (ab 2026-11-06): ein Revocation-Eintrag ohne
+  `rekor_tlog_entry` faellt nicht mehr still auf das selbst-attestierte `revoked_at` zurueck,
+  sondern wird in `checkSignerNotRevokedAfterEvidenceTime()` abgelehnt -- verhindert, dass ein
+  kompromittierter Schluessel sein eigenes `revoked_at` zurueckdatiert, um damit signierte Evidence
+  rueckwirkend zu entwerten.
+- **`revocationRecordContentHash()` + `PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST`**:
+  Grandfathering fuer die vier echten Revocations VOR dem Cutoff (04./14.09.2026-Key-Migrationen)
+  haengt jetzt an einer festen Inhalts-Hash-Allowlist statt am selbst behaupteten `revoked_at` --
+  sonst liesse sich ein heute neu gemintetet Record mit zurueckdatiertem `revoked_at` unbemerkt
+  als "alt genug" durchschleusen.
+- **`verifyRekorInclusionForArtifact()`** (aus `verifyRekorStapling()` extrahiert, identische
+  Kryptologik) **+ `PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY`**: die Allowlist
+  selbst ist kein nackter `Set<string>`-Konstante im Quelltext mehr, sondern ein kanonisches
+  Dokument, dessen Inhalts-Hash einmalig live gegen `rekor.sigstore.dev` geloggt wurde (`entry_uuid`
+  im Quelltext gepinnt) -- `checkPreCutoffGrandfatheredAllowlist()` prueft die Inclusion live nach,
+  fail-closed wenn der Eintrag fehlt. Loest nicht die Bootstrap-Grenze des gepinnten Werts selbst
+  (siehe Kommentar in `verify.ts`), macht die Liste aber oeffentlich nachpruefbar statt nur ein
+  unsichtbarer Diff in diesem Repo.
+
+`test/rekor-stapling.test.mjs` um die Cutoff-/Allowlist-Faelle ergaenzt (`revocationRecordContentHash`
+gegen den real gepinnten Hash gegengeprueft, `verifyRekorInclusionForArtifact()` gegen einen echten,
+live submittierten Rekor-Eintrag verifiziert). `verify.py`/`_verifier.py` bewusst NICHT angefasst --
+diese Pruefung bleibt eine dokumentierte TS-only-Luecke.
 
 Externe Kritik (GitHub-Issues #5/#6/#8/#12 in diesem Repo, Sparkz400/Nico Schuermann). Vier reale
 Luecken, alle direkt am Code gegengeprueft, keine Rueckmeldung des Melders zu den Fixes bisher:
@@ -672,6 +756,84 @@ attested by this verifier.
 If one system controls both the work and every event in the bundle, an internally consistent bundle
 can still contain false claims. Stronger assurance requires an independent event source, runtime
 attestation, or reproducible re-execution.
+
+## Release signing
+
+Tagged releases (`.github/workflows/release.yml`, triggered on `v*.*.*` tags) are signed keyless
+with [cosign](https://docs.sigstore.dev/cosign/) via GitHub Actions OIDC -- no private key is
+stored anywhere, the signing identity is the workflow run itself, and the signature is logged to
+the public [Rekor](https://rekor.sigstore.dev) transparency log (same log used by
+`verifyRekorStapling()` above, different artifact). Each release carries the packaged tarball
+(`verify.ts`/`verify.py`/`dist/`/`spec/`/`trust-anchor.json`) plus its `.sig`/`.pem`/`SHA256SUMS`.
+
+Verify a downloaded release (needs `cosign` and `gh` installed):
+
+```bash
+./verify-release.sh alex-mrtb-verify-bundle-v1.0.0.tar.gz alex-mrtb-verify-bundle-v1.0.0.tar.gz.sig alex-mrtb-verify-bundle-v1.0.0.tar.gz.pem
+```
+
+This runs two independent, additive checks, not one:
+
+1. `cosign verify-blob` checks the certificate's identity against exactly this repo's
+   `release.yml` workflow on a tag ref -- a release asset re-uploaded by someone with push access,
+   but not rebuilt by CI, fails this check even though it would still look like a normal GitHub
+   release. This binds the artifact to "this repo's CI built it", not to "this content is
+   correct" -- a compromised release/CI workflow definition still signs, cleanly and verifiably,
+   whatever it is told to build, including a maliciously altered `verify.ts`. It pins the
+   **workflow's identity**, not any specific source commit.
+2. `gh attestation verify` checks the SLSA build provenance attestation for this exact artifact
+   digest (see "Reproducible builds" below) -- which source commit and build recipe produced it.
+   This pins the **artifact digest to that commit**, which step 1 alone does not: a swapped
+   `release.yml` that still reports the right workflow identity would still fail this check,
+   because the provenance predicate's subject digest and recorded commit would no longer match
+   what the attacker actually built.
+
+Together they are a DIFFERENT, additive guarantee from the human-approval signature above (which
+guards one specific constant against a compromised release process): these two guard against
+someone tampering with a release asset *after* CI produced it, and against the workflow identity
+being satisfied without the provenance-recorded commit actually matching -- not against the
+source commit itself being malicious, which still needs code review.
+
+### Reproducible builds
+
+Signing proves "this artifact came out of this repo's CI run." It does not prove "the code inside
+this artifact is what the public source actually says" -- a compromised `release.yml` would still
+sign, cleanly and verifiably, whatever it was told to build, including a maliciously altered
+`verify.ts`. Reproducible builds move that boundary one step further, not past it: anyone, without
+trusting our CI at all, can rebuild the tagged commit themselves and check the result byte-for-byte
+against the published, signed tarball.
+
+The release workflow (`.github/workflows/release.yml`) packages the tarball deterministically:
+Node (`20.20.2`) and Python (`3.12.16`) are pinned to exact patch versions, not floating majors;
+`npm ci` installs from the committed lockfile; and the tarball itself is built with
+`tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@<commit time>"` piped through
+`gzip -n`, so file order, ownership, permissions bits from `cp`, and every timestamp are fixed to
+the tagged commit's own commit time -- never "now", which would differ between any two builds of
+the same tag. Rebuilding the same tagged commit on a different machine, days apart, has been
+verified to produce a byte-identical tarball (identical `sha256sum`).
+
+Two independent, additive checks confirm this on every tagged release, not just as a one-off claim:
+
+- **SLSA provenance attestation** -- `actions/attest-build-provenance` records which exact source
+  commit, workflow file, and GitHub Actions run produced the tarball, signed and stored in GitHub's
+  attestation log. Verify a downloaded tarball against it with the `gh` CLI:
+
+  ```bash
+  gh attestation verify alex-mrtb-verify-bundle-v1.0.0.tar.gz --repo Alex-Proof/alex-mrtb-verify-bundle
+  ```
+
+- **Independent rebuild-and-compare CI job** -- a second job (`reproduce`) in the same workflow run
+  checks out the identical tag on its own, separate runner, rebuilds the tarball from source with
+  no input from the `release` job other than the git ref, and fails the workflow run if its
+  `sha256sum` does not exactly match the tarball the `release` job signed and published. This is the
+  actual proof; the attestation above records *what* was built, this job proves *that it is
+  rebuildable*.
+
+**Honest limit:** reproducibility proves artifact and source match -- it says nothing about whether
+the source itself is correct or free of an intentionally planted vulnerability. A malicious commit
+that passes `npm test` reproduces just as faithfully as a benign one. This closes the "artifact vs.
+source" gap, not the "is the source itself trustworthy" question -- that one still needs actual code
+review.
 
 ## Live-Vorab-Check: `rights-gate-check.sh`
 

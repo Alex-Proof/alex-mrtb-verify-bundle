@@ -184,6 +184,12 @@ export interface ObserverReceipt {
   received_at: string;
 }
 
+/** Mirrors adapters/observerRelay.server.ts (no shared import between server and this standalone verifier). */
+export interface ExecutionLogReceipt extends ObserverReceipt {
+  entry_hash: string;
+  sequence: number;
+}
+
 export interface ApprovalAttestationV1 {
   schema_version: "approval-attestation@1.0"; actor_id: string; approved_at: string; bundle_sha256: string;
   signer_key_id: string; public_key: string; signature: string;
@@ -1444,6 +1450,408 @@ interface DevTaskDiffEvidenceTraceEvent {
   scope: "diff_stat_only" | "diff_stat_and_full";
 }
 
+interface GovernanceBlockedAttemptRef {
+  run_id?: string; reason: string;
+  // Governance layer, slice 3: additionally needed for buildEnforcementRecordsV1().
+  event_type?: string; observed_at: string;
+}
+
+interface GovernanceNetworkScopeViolationRef { dst_ip: string; dst_port: number; protocol: "tcp" | "udp"; observed_at: string; }
+
+// Governance layer, slice 3: mirrors core/enforcementRecord.server.ts (no shared import between
+// server and this standalone verifier). On any change there: make the identical change here
+// (REASON_CONTROL_TYPE/controlTypeFor/controlActiveProofFor/buildEnforcementRecordsV1).
+const ENFORCEMENT_RECORD_SCHEMA_VERSION = "enforcement-record@1.0" as const;
+type ControlType = "egress" | "secret" | "path" | "human_gate" | "privilege" | "self_replication";
+type EnforcementResult = "blocked" | "allowed" | "unknown";
+type EnforcementObservedBy = "observer" | "enforcer" | "agent_reported";
+
+interface EnforcementRecordV1 {
+  schema_version: typeof ENFORCEMENT_RECORD_SCHEMA_VERSION;
+  record_id: string;
+  constraint_id: string;
+  control_type: ControlType;
+  attempt: string;
+  result: EnforcementResult;
+  control_active_proof: string | null;
+  observed_by: EnforcementObservedBy;
+  ts: string;
+}
+
+const REASON_CONTROL_TYPE: Record<string, ControlType> = {
+  path_outside_allowlist: "path", symlink_outside_allowlist: "path", os_write_denied: "path",
+  secret_path_access_denied: "secret",
+  capability_not_bound: "privilege", tool_not_in_parent_capability_set: "privilege",
+  data_access_not_in_parent_capability_set: "privilege", runtime_exceeds_parent_budget: "privilege",
+  trifecta_violation: "privilege", trust_transition_not_allowed: "privilege",
+  change_gate_critical_must_open: "privilege", change_gate_rule_disable_denied: "privilege",
+  capability_mapping_missing: "privilege", collab_violation: "privilege",
+  write_despite_read_contract: "privilege", midrun_append_requires_change_gate: "privilege",
+  awaiting_human: "human_gate", destructive_target_requires_second_approval: "human_gate",
+  approval_target_changed: "human_gate",
+};
+
+function controlTypeForBlockedAttempt(attempt: GovernanceBlockedAttemptRef): ControlType | null {
+  if (attempt.event_type === "population_lock") return "self_replication";
+  return REASON_CONTROL_TYPE[attempt.reason] ?? null;
+}
+
+interface GovernanceSandboxProofRef { file_observation?: unknown; network_capture?: unknown }
+
+function controlActiveProofForEnforcement(
+  controlType: ControlType, sandbox: GovernanceSandboxProofRef | null | undefined,
+  receipts: ExecutionLogReceipt[] | undefined,
+): { ref: string | null; observedBy: EnforcementObservedBy } {
+  // Identical hashing to core/enforcementRecord.server.ts (sha256Json): raw JSON.stringify, NOT
+  // canonicalEvidenceJson -- both sides hash the same object, already read from the bundle file in
+  // identical key order; a diverging canonicalization algorithm would always produce a mismatch
+  // here, even for an unchanged bundle.
+  if (sandbox) {
+    if ((controlType === "path" || controlType === "self_replication") && sandbox.file_observation) {
+      return { ref: `sandbox_attestation.file_observation:sha256:${sha256(JSON.stringify(sandbox.file_observation))}`, observedBy: "enforcer" };
+    }
+    if (controlType === "egress" && sandbox.network_capture) {
+      return { ref: `sandbox_attestation.network_capture:sha256:${sha256(JSON.stringify(sandbox.network_capture))}`, observedBy: "enforcer" };
+    }
+  }
+  // Mirrors core/enforcementRecord.server.ts -- execution_log_receipts only counts for
+  // "privilege"/"secret" (those run without a sandbox).
+  if ((controlType === "privilege" || controlType === "secret") && receipts && receipts.length > 0) {
+    return { ref: `execution_log_receipts:sha256:${sha256(JSON.stringify(receipts))}`, observedBy: "observer" };
+  }
+  return { ref: null, observedBy: "agent_reported" };
+}
+
+function buildEnforcementRecordsV1(
+  constraintId: string, blockedAttempts: GovernanceBlockedAttemptRef[],
+  networkViolations: GovernanceNetworkScopeViolationRef[], sandbox: GovernanceSandboxProofRef | null | undefined,
+  delegationDenials: GovernanceBlockedAttemptRef[] = [],
+  executionLogReceipts: ExecutionLogReceipt[] = [],
+): EnforcementRecordV1[] {
+  const records: EnforcementRecordV1[] = [];
+  blockedAttempts.forEach((attempt, index) => {
+    const controlType = controlTypeForBlockedAttempt(attempt);
+    if (!controlType) return;
+    const proof = controlActiveProofForEnforcement(controlType, sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:blocked_attempt:${index}`,
+      constraint_id: constraintId, control_type: controlType, attempt: sha256(JSON.stringify(attempt)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: attempt.observed_at,
+    });
+  });
+  networkViolations.forEach((violation, index) => {
+    const proof = controlActiveProofForEnforcement("egress", sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:network_violation:${index}`,
+      constraint_id: constraintId, control_type: "egress", attempt: sha256(JSON.stringify(violation)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: violation.observed_at,
+    });
+  });
+  // Governance layer, slice 5: mirrors core/enforcementRecord.server.ts.
+  delegationDenials.forEach((attempt, index) => {
+    const controlType = controlTypeForBlockedAttempt(attempt);
+    if (!controlType) return;
+    const proof = controlActiveProofForEnforcement(controlType, sandbox, executionLogReceipts);
+    records.push({
+      schema_version: ENFORCEMENT_RECORD_SCHEMA_VERSION, record_id: `enforcement:${constraintId}:delegation_denial:${index}`,
+      constraint_id: constraintId, control_type: controlType, attempt: sha256(JSON.stringify(attempt)),
+      result: "blocked", control_active_proof: proof.ref, observed_by: proof.observedBy, ts: attempt.observed_at,
+    });
+  });
+  return records;
+}
+
+// Governance layer, slice 6: mirrors core/governanceIncident.server.ts -- same "no shared import" constraint.
+export const INCIDENT_RECORD_SCHEMA_VERSION = "incident-record@1.0" as const;
+export type IncidentType =
+  | "policy_violation" | "unauthorized_access_attempt" | "delegation_violation"
+  | "approval_bypass_attempt" | "sandbox_escape_attempt" | "unexpected_external_communication"
+  | "observer_failure" | "evidence_integrity_failure";
+export type IncidentEvidenceStatus = "complete" | "gap";
+export interface IncidentRecordV1 {
+  schema_version: typeof INCIDENT_RECORD_SCHEMA_VERSION; incident_id: string; incident_type: IncidentType;
+  tuple_ref: string; enforcement_refs: string[]; evidence_status: IncidentEvidenceStatus; detail: string; ts: string;
+}
+
+const CONTROL_TYPE_INCIDENT: Partial<Record<ControlType, IncidentType>> = {
+  egress: "unexpected_external_communication", secret: "unauthorized_access_attempt",
+  path: "sandbox_escape_attempt", self_replication: "sandbox_escape_attempt", human_gate: "approval_bypass_attempt",
+};
+
+/** Identical logic to buildIncidentRecordsV1() in core/governanceIncident.server.ts. */
+export function buildIncidentRecordsV1(tupleId: string, enforcement: EnforcementRecordV1[]): IncidentRecordV1[] {
+  const records: IncidentRecordV1[] = [];
+  enforcement.forEach((record, index) => {
+    let incidentType: IncidentType | undefined;
+    if (record.control_type === "privilege") {
+      incidentType = record.record_id.includes(":delegation_denial:") ? "delegation_violation" : "policy_violation";
+    } else {
+      incidentType = CONTROL_TYPE_INCIDENT[record.control_type];
+    }
+    if (!incidentType) return;
+    records.push({
+      schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:${index}`,
+      incident_type: incidentType, tuple_ref: tupleId, enforcement_refs: [record.record_id],
+      evidence_status: record.control_active_proof !== null ? "complete" : "gap",
+      detail: record.control_type, ts: record.ts,
+    });
+  });
+  return records;
+}
+
+/** Identical logic to detectObserverFailureIncident() in core/governanceIncident.server.ts. */
+export function detectObserverFailureIncident(
+  tupleId: string, input: { observerReceiptPresent: boolean; observerConfirmed: boolean | null },
+): IncidentRecordV1 | null {
+  if (!input.observerReceiptPresent || input.observerConfirmed !== false) return null;
+  return {
+    schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:observer_failure`,
+    incident_type: "observer_failure", tuple_ref: tupleId, enforcement_refs: [], evidence_status: "gap",
+    detail: "observer_receipt_present_but_cross_check_failed", ts: new Date().toISOString(),
+  };
+}
+
+/** Identical logic to detectEvidenceIntegrityFailureIncident() in core/governanceIncident.server.ts. */
+export function detectEvidenceIntegrityFailureIncident(
+  tupleId: string, input: { signatureOk: boolean; hashChainOk: boolean; reason?: string },
+): IncidentRecordV1 | null {
+  if (input.signatureOk && input.hashChainOk) return null;
+  return {
+    schema_version: INCIDENT_RECORD_SCHEMA_VERSION, incident_id: `incident:${tupleId}:evidence_integrity_failure`,
+    incident_type: "evidence_integrity_failure", tuple_ref: tupleId, enforcement_refs: [], evidence_status: "gap",
+    detail: input.reason ?? (!input.signatureOk ? "signature_invalid" : "hash_chain_invalid"), ts: new Date().toISOString(),
+  };
+}
+
+export type GovernanceRunStatus = "verified" | "partial" | "failed";
+export interface IncidentGateResult { max_status: GovernanceRunStatus; blocking_incidents: string[] }
+
+/** Identical logic to governanceIncidentGate() in core/governanceIncident.server.ts. */
+export function governanceIncidentGate(incidents: IncidentRecordV1[]): IncidentGateResult {
+  const blocking = incidents.filter((i) => i.incident_type === "observer_failure" || i.incident_type === "evidence_integrity_failure");
+  return { max_status: blocking.length > 0 ? "partial" : "verified", blocking_incidents: blocking.map((i) => i.incident_id) };
+}
+
+export interface EnforcementVerification { status: "enforced" | "partial" | "not_run"; evidence_gaps: string[] }
+
+/** Identical logic to verifyEnforcementRecords() in core/enforcementRecord.server.ts. */
+export function verifyEnforcementRecords(records: EnforcementRecordV1[]): EnforcementVerification {
+  if (records.length === 0) return { status: "not_run", evidence_gaps: [] };
+  const gaps = records.filter((r) => r.control_active_proof === null).map((r) => r.record_id);
+  return { status: gaps.length === 0 ? "enforced" : "partial", evidence_gaps: gaps };
+}
+
+// Governance layer, slice 5: mirrors core/governanceDelegation.server.ts -- same "no shared import"
+// constraint. Only the VALIDATION side (verifyDelegationChain/verifyDelegationLinkSignature/
+// verifyDelegationChainSignatures) -- this CLI verifier never builds/signs a delegation chain
+// itself, only core/governanceDelegation.server.ts (live, wired in host/agentLoop.server.ts) does.
+export const DELEGATION_LINK_SCHEMA_VERSION = "delegation-link@1.0" as const;
+export interface DelegationPartyV1 { kind: "principal" | "agent"; id: string }
+export interface DelegationScopeV1 { tool_manifest: string[]; data_access: string[]; max_runtime_ms: number }
+export interface DelegationSignatureV1 { algorithm: "ed25519"; public_key: string; signature: string }
+export interface DelegationLinkV1 {
+  schema_version: typeof DELEGATION_LINK_SCHEMA_VERSION;
+  delegation_id: string; parent: DelegationPartyV1; child: string; scope: DelegationScopeV1;
+  valid_from: string; valid_until: string; revocable: boolean; revoked_at: string | null;
+  inherited_constraints: ("tool_manifest" | "data_access" | "max_runtime_ms")[];
+  signature: DelegationSignatureV1 | null; parent_delegation_id: string | null;
+}
+
+export type DelegationChainStatus = "verified" | "failed" | "not_run";
+export interface DelegationChainVerification { status: DelegationChainStatus; reason?: string; link_id?: string }
+
+function isSubsetOf(child: readonly string[], parent: readonly string[]): boolean {
+  const parentSet = new Set(parent);
+  return child.every((value) => parentSet.has(value));
+}
+
+/** Identical logic to verifyDelegationChain() in core/governanceDelegation.server.ts. */
+export function verifyDelegationChain(chain: DelegationLinkV1[]): DelegationChainVerification {
+  if (chain.length === 0) return { status: "not_run" };
+  const first = chain[0];
+  if (first.parent.kind !== "principal") {
+    return { status: "failed", reason: "chain_does_not_start_at_principal", link_id: first.delegation_id };
+  }
+  for (let i = 1; i < chain.length; i++) {
+    const link = chain[i];
+    const parentLink = chain[i - 1];
+    if (link.parent.kind !== "agent" || link.parent.id !== parentLink.child) {
+      return { status: "failed", reason: "chain_broken", link_id: link.delegation_id };
+    }
+    if (link.parent_delegation_id !== parentLink.delegation_id) {
+      return { status: "failed", reason: "parent_delegation_id_mismatch", link_id: link.delegation_id };
+    }
+    if (!isSubsetOf(link.scope.tool_manifest, parentLink.scope.tool_manifest)
+      || !isSubsetOf(link.scope.data_access, parentLink.scope.data_access)
+      || link.scope.max_runtime_ms > parentLink.scope.max_runtime_ms) {
+      return { status: "failed", reason: "privilege_escalation", link_id: link.delegation_id };
+    }
+  }
+  return { status: "verified" };
+}
+
+export interface DelegationSignatureVerification { status: "verified" | "unsigned" | "invalid"; link_id: string }
+
+/** Identical logic to verifyDelegationLinkSignature() in core/governanceDelegation.server.ts. */
+export function verifyDelegationLinkSignature(link: DelegationLinkV1): DelegationSignatureVerification {
+  if (!link.signature) return { status: "unsigned", link_id: link.delegation_id };
+  const { signature, ...unsigned } = link;
+  const bytes = Buffer.from(canonical(unsigned), "utf8");
+  let ok: boolean;
+  try {
+    ok = verify(null, bytes, signature.public_key, Buffer.from(signature.signature, "base64"));
+  } catch {
+    ok = false;
+  }
+  return { status: ok ? "verified" : "invalid", link_id: link.delegation_id };
+}
+
+export interface DelegationChainSignatureVerification {
+  status: "verified" | "partial" | "unsigned" | "invalid"; unsigned_links: string[]; invalid_links: string[];
+}
+
+/** Identical logic to verifyDelegationChainSignatures() in core/governanceDelegation.server.ts. */
+export function verifyDelegationChainSignatures(chain: DelegationLinkV1[]): DelegationChainSignatureVerification {
+  const results = chain.map(verifyDelegationLinkSignature);
+  const invalid = results.filter((r) => r.status === "invalid").map((r) => r.link_id);
+  const unsigned = results.filter((r) => r.status === "unsigned").map((r) => r.link_id);
+  if (invalid.length > 0) return { status: "invalid", unsigned_links: unsigned, invalid_links: invalid };
+  if (chain.length > 0 && unsigned.length === chain.length) return { status: "unsigned", unsigned_links: unsigned, invalid_links: [] };
+  if (unsigned.length > 0) return { status: "partial", unsigned_links: unsigned, invalid_links: [] };
+  return { status: "verified", unsigned_links: [], invalid_links: [] };
+}
+
+// Trust-anchor pinning: verifyDelegationLinkSignature() only checks against the public_key
+// EMBEDDED in the link -- that proves record integrity, not WHO signed it. This function compares
+// the embedded key with the independently sourced human_approval trust anchor (delegation links are
+// signed with the approval key). Deliberately only in the CLI verifier (needs the live consensus
+// from crossCheckTrustAnchor() or a key passed in by the caller) and NOT mirrored into _verifier.py
+// (Python stays honestly "not checked"). No validity-window/revocation check: the published trust
+// anchor only contains the currently active key -- a rotated key therefore shows up as
+// not_pinned, not as disproven.
+export type DelegationSignerPinningStatus = "pinned" | "not_pinned" | "not_checked" | "not_applicable";
+export interface DelegationSignerPinningResult { status: DelegationSignerPinningStatus; unpinned_links: string[] }
+
+export function pinDelegationChainSigners(chain: DelegationLinkV1[], trustedApprovalPublicKey?: string | null): DelegationSignerPinningResult {
+  const signed = chain.filter((link) => link.signature);
+  if (signed.length === 0) return { status: "not_applicable", unpinned_links: [] };
+  if (!trustedApprovalPublicKey) return { status: "not_checked", unpinned_links: [] };
+  const trusted = trustedApprovalPublicKey.trim();
+  const unpinned = signed.filter((link) => link.signature!.public_key.trim() !== trusted).map((link) => link.delegation_id);
+  return unpinned.length > 0 ? { status: "not_pinned", unpinned_links: unpinned } : { status: "pinned", unpinned_links: [] };
+}
+
+// Policy-ref pinning: verifyBundleObject() only checks the Ed25519 signature -- that proves
+// policy_ref has been unchanged since signing, not that the claimed hash is actually the
+// active/approved policy version. core/governancePolicyVersion.server.ts:verifyPolicyRef() could
+// check that server-side against DB history, but is deliberately NOT mirrored here (needs live DB
+// access, see that file's header comment) -- this standalone verifier stays offline-runnable.
+// Instead, the identical pattern as pinDelegationChainSigners() above: comparison against a pinned
+// reference hash passed in independently by the caller (ALEX_VERIFY_PINNED_POLICY_HASH). Without
+// it the result honestly stays `not_checked` -- never `pinned` without an actual counter-check, and
+// (like delegation_signer_pinning) never influences the main verdict/claim ladder.
+export type PolicyRefPinningStatus = "pinned" | "not_pinned" | "not_checked" | "not_applicable";
+export interface PolicyRefPinningResult { status: PolicyRefPinningStatus }
+
+export function pinPolicyRef(
+  policyRef: { policy_id: string; version: number; hash: string } | null | undefined,
+  pinnedPolicyHash?: string | null,
+): PolicyRefPinningResult {
+  if (!policyRef) return { status: "not_applicable" };
+  if (!pinnedPolicyHash) return { status: "not_checked" };
+  return { status: policyRef.hash.trim() === pinnedPolicyHash.trim() ? "pinned" : "not_pinned" };
+}
+
+// Governance layer, slice 4: mirrors core/governanceProvenance.server.ts -- same "no shared
+// import" constraint. deriveLive... at the end of this block is deliberately NOT mirrored into
+// _verifier.py (same reason as verifyPolicyRef() above: the Python verifier never makes a fresh
+// network call), but lives here in TS because this CLI verifier already calls
+// crossCheckObserverReceipt() live (see main() below).
+export const GOVERNANCE_PROVENANCE_SCHEMA_VERSION = "governance-provenance@1.0" as const;
+export const GOVERNANCE_PROVENANCE_LABELS = [
+  "agent_reported", "observer_confirmed", "enforcer_recorded", "verifier_checked", "unobserved",
+] as const;
+export type GovernanceProvenanceLabel = typeof GOVERNANCE_PROVENANCE_LABELS[number];
+export const GOVERNANCE_PROVENANCE_STATEMENT = "Self-reported compliance is not independently verified compliance." as const;
+export const GOVERNANCE_PROVENANCE_FIELDS = [
+  "actor", "principal", "mandate", "authority", "constraints", "context",
+  "actions", "decisions", "approvals", "evidence_refs", "enforcement", "outcome",
+] as const;
+export type GovernanceProvenanceField = typeof GOVERNANCE_PROVENANCE_FIELDS[number];
+
+export interface GovernanceProvenanceEventV1 { ref: string; label: GovernanceProvenanceLabel }
+export interface GovernanceProvenanceV1 {
+  schema_version: typeof GOVERNANCE_PROVENANCE_SCHEMA_VERSION;
+  fields: Record<GovernanceProvenanceField, GovernanceProvenanceLabel>;
+  events: GovernanceProvenanceEventV1[];
+}
+
+function enforcementObservedByToLabel(observedBy: EnforcementObservedBy): GovernanceProvenanceLabel {
+  if (observedBy === "enforcer") return "enforcer_recorded";
+  if (observedBy === "observer") return "observer_confirmed";
+  return "agent_reported";
+}
+
+export interface GovernanceProvenanceInput {
+  decisionsCount: number; approvalsCount: number; enforcement: EnforcementRecordV1[]; policyRefPresent: boolean;
+}
+
+/** Identical logic to buildGovernanceProvenanceV1() in core/governanceProvenance.server.ts. */
+export function buildGovernanceProvenanceV1(input: GovernanceProvenanceInput): GovernanceProvenanceV1 {
+  const eventLabels = input.enforcement.map((record) => enforcementObservedByToLabel(record.observed_by));
+  const enforcementFieldLabel: GovernanceProvenanceLabel =
+    input.enforcement.length === 0 ? "unobserved"
+    : eventLabels.every((label) => label === "enforcer_recorded") ? "enforcer_recorded"
+    : eventLabels.every((label) => label === "observer_confirmed") ? "observer_confirmed"
+    : "agent_reported";
+  const fields: Record<GovernanceProvenanceField, GovernanceProvenanceLabel> = {
+    actor: "agent_reported", principal: "agent_reported", mandate: "agent_reported", authority: "agent_reported",
+    constraints: input.policyRefPresent ? "agent_reported" : "unobserved",
+    context: "agent_reported",
+    actions: input.decisionsCount === 0 ? "unobserved" : "verifier_checked",
+    decisions: input.decisionsCount === 0 ? "unobserved" : "verifier_checked",
+    approvals: input.approvalsCount === 0 ? "unobserved" : "agent_reported",
+    evidence_refs: "agent_reported",
+    enforcement: enforcementFieldLabel,
+    outcome: "agent_reported",
+  };
+  const events = input.enforcement.map((record, i) => ({ ref: record.record_id, label: eventLabels[i] }));
+  return { schema_version: GOVERNANCE_PROVENANCE_SCHEMA_VERSION, fields, events };
+}
+
+export interface GovernanceProvenanceSummaryV1 {
+  counts: Record<GovernanceProvenanceLabel, number>; total: number; statement: typeof GOVERNANCE_PROVENANCE_STATEMENT;
+}
+
+/** Identical logic to summarizeGovernanceProvenance() in core/governanceProvenance.server.ts. */
+export function summarizeGovernanceProvenance(provenance: GovernanceProvenanceV1): GovernanceProvenanceSummaryV1 {
+  const counts: Record<GovernanceProvenanceLabel, number> = {
+    agent_reported: 0, observer_confirmed: 0, enforcer_recorded: 0, verifier_checked: 0, unobserved: 0,
+  };
+  for (const label of Object.values(provenance.fields)) counts[label]++;
+  for (const evt of provenance.events) counts[evt.label]++;
+  const total = GOVERNANCE_PROVENANCE_FIELDS.length + provenance.events.length;
+  return { counts, total, statement: GOVERNANCE_PROVENANCE_STATEMENT };
+}
+
+export interface GovernanceProvenanceLiveInput { observerReceiptPresent: boolean; observerConfirmed: boolean | null }
+export interface GovernanceProvenanceLiveResult {
+  status: "consistent" | "discrepancy" | "not_checked"; upgraded_fields: GovernanceProvenanceField[]; discrepancies: string[];
+}
+
+/** Identical logic to deriveLiveGovernanceProvenanceV1() in core/governanceProvenance.server.ts. */
+export function deriveLiveGovernanceProvenanceV1(
+  provenance: GovernanceProvenanceV1, input: GovernanceProvenanceLiveInput,
+): GovernanceProvenanceLiveResult {
+  if (!input.observerReceiptPresent) return { status: "not_checked", upgraded_fields: [], discrepancies: [] };
+  if (input.observerConfirmed === null) return { status: "not_checked", upgraded_fields: [], discrepancies: [] };
+  if (input.observerConfirmed === false) {
+    return { status: "discrepancy", upgraded_fields: [], discrepancies: ["observer_receipt_present_but_cross_check_failed"] };
+  }
+  const upgraded = GOVERNANCE_PROVENANCE_FIELDS.filter((field) => provenance.fields[field] === "agent_reported");
+  return { status: "consistent", upgraded_fields: upgraded, discrepancies: [] };
+}
+
 const DEVTASK_DIFF_EVIDENCE_PREFIX = "devtask_diff_evidence:";
 const DEVTASK_CI_RESULT_PREFIX = "devtask_ci_result:";
 
@@ -2341,11 +2749,18 @@ const REKOR_BASE_URL = "https://rekor.sigstore.dev";
  *  later change to the body breaks (3) anyway. Only once (1)-(3) hold is it proven that this
  *  revocation REALLY existed at the claimed time -- not invented/backdated after the fact by a
  *  compromised backend. */
-export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{ ok: boolean; reason?: string }> {
-  const entry = record.rekor_tlog_entry;
-  if (!entry) return { ok: false, reason: "no_rekor_tlog_entry" };
+/** Generic core of steps (2)+(3) below: checks that Rekor's log entry `entry` REALLY hashes/logs
+ *  exactly `artifact` (arbitrary bytes, not only a RevocationRecordV1), and that the Merkle
+ *  inclusion + checkpoint signature are valid against Rekor's current, live-fetched public key.
+ *  Deliberately makes NO claim about authorship (who created the artifact) -- that is the
+ *  caller's job (step (1) below for RevocationRecordV1, set membership in the source itself for
+ *  PreCutoffGrandfatheredAllowlistV1). Extracted 09.11.2026 out of verifyRekorStapling() for
+ *  checkPreCutoffGrandfatheredAllowlist() below -- identical cryptography, different artifact. */
+export async function verifyRekorInclusionForArtifact(
+  artifact: Buffer,
+  entry: RekorTlogEntryV1,
+): Promise<{ ok: boolean; reason?: string }> {
   if (entry.schema_version !== "rekor-tlog-entry@1.0") return { ok: false, reason: "unsupported_rekor_tlog_entry_schema" };
-  if (!record.self_attestation_signature) return { ok: false, reason: "no_self_attestation_signature" };
 
   let body: any;
   try {
@@ -2355,20 +2770,6 @@ export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{
   }
   if (body.kind !== "hashedrekord") return { ok: false, reason: "rekor_body_unexpected_kind" };
 
-  // Step (1): self-attestation -- independent of Rekor, checkable with the public_key_pem
-  // already contained in the record itself.
-  const { rekor_tlog_entry: _omitEntry, self_attestation_signature: _omitSig, ...baseRecord } = record;
-  const baseArtifact = Buffer.from(canonicalEvidenceJson(baseRecord), "utf8");
-  // Ed25519/PureEdDSA requires algorithm=null for Node's crypto.verify() (unlike RSA/ECDSA, which
-  // always expect a hash-algorithm string) -- exactly why this does NOT use @sigstore/verify's
-  // higher-level Verifier/SignedEntity API (see type comment above).
-  if (!verify(null, baseArtifact, record.public_key_pem, Buffer.from(record.self_attestation_signature, "base64"))) {
-    return { ok: false, reason: "self_attestation_signature_invalid" };
-  }
-
-  // Step (2): Rekor hashed/logged exactly the record INCLUDING this self-attestation.
-  const { rekor_tlog_entry: _omit, ...attestedRecord } = record;
-  const artifact = Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8");
   const expectedHash = createHash("sha256").update(artifact).digest("hex");
   if (body.spec?.data?.hash?.algorithm !== "sha256" || body.spec.data.hash.value !== expectedHash) {
     return { ok: false, reason: "rekor_body_hash_mismatch" };
@@ -2413,6 +2814,29 @@ export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{
   return { ok: true };
 }
 
+export async function verifyRekorStapling(record: RevocationRecordV1): Promise<{ ok: boolean; reason?: string }> {
+  const entry = record.rekor_tlog_entry;
+  if (!entry) return { ok: false, reason: "no_rekor_tlog_entry" };
+  if (!record.self_attestation_signature) return { ok: false, reason: "no_self_attestation_signature" };
+
+  // Step (1): self-attestation -- independent of Rekor, checkable with the public_key_pem
+  // already contained in the record itself.
+  const { rekor_tlog_entry: _omitEntry, self_attestation_signature: _omitSig, ...baseRecord } = record;
+  const baseArtifact = Buffer.from(canonicalEvidenceJson(baseRecord), "utf8");
+  // Ed25519/PureEdDSA requires algorithm=null for Node's crypto.verify() (unlike RSA/ECDSA, which
+  // always expect a hash-algorithm string) -- exactly why this does NOT use @sigstore/verify's
+  // higher-level Verifier/SignedEntity API (see type comment above).
+  if (!verify(null, baseArtifact, record.public_key_pem, Buffer.from(record.self_attestation_signature, "base64"))) {
+    return { ok: false, reason: "self_attestation_signature_invalid" };
+  }
+
+  // Steps (2)+(3): Rekor hashed/logged exactly the record INCLUDING this self-attestation, and
+  // Merkle inclusion + checkpoint signature are valid (real Sigstore cryptography, not
+  // reimplemented).
+  const { rekor_tlog_entry: _omit, ...attestedRecord } = record;
+  return verifyRekorInclusionForArtifact(Buffer.from(canonicalEvidenceJson(attestedRecord), "utf8"), entry);
+}
+
 // 06.11.2026 (SaSame/DM challenge: revoked_at is self-attested -- a compromised key can forge/
 // backdate its own revoked_at to devalue evidence it signed itself). Rekor's integrated_time
 // cannot be chosen by the key holder -- as long as a real, inclusion-proof-valid rekor_tlog_entry
@@ -2427,6 +2851,196 @@ export function computeEffectiveRevokedAt(record: RevocationRecordV1): string | 
   if (!record.rekor_tlog_entry) return record.revoked_at;
   const rekorMs = record.rekor_tlog_entry.integrated_time * 1000;
   return new Date(Math.max(selfAttestedMs, rekorMs)).toISOString();
+}
+
+// 06.11.2026 (SaSame/DM challenge, see computeEffectiveRevokedAt() comment above: revoked_at is
+// self-attested -- a compromised key can forge/backdate it). Rekor's integrated_time cannot be
+// chosen by the key holder -- as long as a real, inclusion-proof-valid rekor_tlog_entry is
+// present, the maximum of the two times is the earliest point an attacker cannot undercut.
+// Without rekor_tlog_entry, revoked_at remains the only source -- deliberately left as-is for
+// revocations BEFORE the cutoff defined below (the ability to staple did not exist back then).
+// Since the cutoff, REKOR_STAPLING_MANDATORY_SINCE applies in
+// checkSignerNotRevokedAfterEvidenceTime() below: a missing rekor_tlog_entry is rejected there
+// instead of silently falling back to revoked_at.
+export const REKOR_STAPLING_MANDATORY_SINCE = "2026-11-06T00:00:00.000Z";
+
+/** Deterministic content hash of a RevocationRecordV1 WITHOUT rekor_tlog_entry/
+ *  self_attestation_signature -- the same canonicalization that the self-attestation itself signs
+ *  (see RevocationRecordV1 comment in the private core/mrtb/evidenceBundle.server.ts). Basis for
+ *  PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST below: membership depends on the exact content of
+ *  this one, already-existing record, not on a field inside it that the same record claims about
+ *  itself. */
+export function revocationRecordContentHash(record: RevocationRecordV1): string {
+  const { rekor_tlog_entry, self_attestation_signature, ...content } = record;
+  return sha256(canonicalEvidenceJson(content));
+}
+
+// 08.11.2026 (SaSame/DM follow-up on the 07.11. cutoff: "What stops a pre-cutoff revocation being
+// minted today?" -- NOTHING, that was the gap). The old comparison
+// `record.revoked_at >= REKOR_STAPLING_MANDATORY_SINCE` checks a field the record's own author
+// sets -- a freshly minted record today with a backdated revoked_at (e.g. October) slipped
+// unnoticed through the grandfather branch and could retroactively devalue real, later evidence.
+// Fix: grandfathering now depends on a FIXED allowlist of content hashes, not on a self-claimed
+// date.
+//
+// 09.11.2026 (SaSame/DM follow-up on the 08.11. fix: "If the four hashes ship as a constant
+// inside the verifier, the verifier binary is the trust anchor and a compromised release can add
+// a fifth"). Yesterday's bare set constant had exactly this problem: nobody outside a source diff
+// could see IF/WHEN a fifth hash was added. Fix: the allowlist is now itself a canonical document
+// (PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST below) that was logged once as its own
+// hashedrekord entry in Rekor (see the private scripts/stapleGrandfatheredRevocationAllowlist.mjs)
+// -- EXACTLY the same cryptography as verifyRekorInclusionForArtifact() above, just applied to a
+// new artifact instead of a single RevocationRecordV1. IMPORTANT, what this does NOT solve (no
+// demo theater): the verifier still pins EXACTLY ONE value in the source -- now the allowlist
+// document's Rekor entry_uuid/inclusion_proof instead of four raw hashes. Whoever can compromise
+// the verifier build can also swap this pinned entry -- the same bootstrap boundary as the pinned
+// Rekor root pubkey itself, not resolved by one more layer of indirection. The real gain: the list
+// is now publicly and verifiably timestamped at rekor.sigstore.dev, no longer just an invisible
+// diff in this repo. (The four real pre-cutoff entries stem from the 2026-09-04/14 key
+// migrations, see PRE_ALEXCORE_CUTOVER_HISTORY in the private evidenceBundle.server.ts -- all four
+// predate the Rekor stapling capability, so correctly have no rekor_tlog_entry OF THEIR OWN.)
+// EVERY other record -- regardless of its claimed revoked_at -- needs a valid rekor_tlog_entry
+// from now on, period.
+export interface GrandfatheredRevocationAllowlistV1 {
+  schema_version: "pre-cutoff-grandfathered-revocation-allowlist@1.0";
+  cutoff: string;
+  content_hashes: string[];
+  note: string;
+  // 2026-11-10 (third follow-up from the same reviewer: "the verifier binary IS the trust floor --
+  // a compromised release can add a fifth hash"). Additive to the Rekor proof above: a signature
+  // from the same human-approval signer already pinned system-wide for approval_attestation
+  // (crossCheckTrustAnchor("human_approval"), not a new anchor). A compromised release/CI process
+  // cannot hold this private key -- it would also have to compromise the human-approval signer,
+  // the same anchor the rest of the approval system already depends on. Does NOT solve the
+  // bootstrap problem itself (see comment above: unsolvable through one more layer of
+  // indirection) -- only closes that this ONE constant had its own, weaker bypass (bare source
+  // edit) that the rest of the system does not have. `null` = not yet signed --
+  // checkPreCutoffGrandfatheredAllowlist() then rejects fail-closed instead of silently falling
+  // back to the bare Rekor check alone.
+  approval_attestation: GrandfatheredAllowlistApprovalAttestationV1 | null;
+}
+
+export interface GrandfatheredAllowlistApprovalAttestationV1 {
+  schema_version: "grandfathered-allowlist-approval-attestation@1.0";
+  actor_id: string;
+  approved_at: string;
+  allowlist_sha256: string;
+  signer_key_id: string;
+  public_key: string;
+  signature: string;
+}
+
+export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST: GrandfatheredRevocationAllowlistV1 = {
+  schema_version: "pre-cutoff-grandfathered-revocation-allowlist@1.0",
+  cutoff: REKOR_STAPLING_MANDATORY_SINCE,
+  content_hashes: [
+    "947bf43969e8e1e0899169a1cc9260f868f0b74479b4b46a3d879506d1f4b684",
+    "b1d918f04f8017ac4c92c60a03054aa431c738c42849768492006cd68cc1af71",
+    "b9c0bbf0a6622f9c61f8b0ae6b6ba30a78b516931e95404dea8af77884438620",
+    "7f2e4db664d582a31c612fbbfdfc55ecf91b11554a30d6a17a2c7ccd455bdf96",
+  ],
+  // This exact text (German) is part of what Rekor witnessed below (the entry's inclusion proof
+  // binds the hash of this whole document, note field included) -- NOT translated to English like
+  // the surrounding comments, translating it would break PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY.
+  note: "Die vier Revocation-Eintraege aus den Key-Migrationen 04./14.09.2026 (Bauanleitung "
+    + "Evidence-Hardening 1.1), die am 08.11.2026 bereits live unter "
+    + "https://alexproof.de/.well-known/alex-pubkey.json standen, bevor Rekor-Stapling existierte. "
+    + "Abgeschlossene, nicht erweiterbare Liste -- jede angebliche weitere Vor-Cutoff-Nachtragung "
+    + "ist per Definition unecht, der Cutoff liegt in der Vergangenheit.",
+  // 2026-11-10: signed once against the real production approval key (Andre's go-ahead obtained
+  // beforehand via AskUserQuestion -- human-gate satisfied, not auto-triggered). signer_key_id/
+  // public_key are identical to the system-wide human-approval signer (ensureApprovalKeypair() in
+  // the private evidenceBundle.server.ts), checked against crossCheckTrustAnchor("human_approval")
+  // in checkPreCutoffGrandfatheredAllowlist() below.
+  approval_attestation: {
+    schema_version: "grandfathered-allowlist-approval-attestation@1.0",
+    actor_id: "Andre",
+    approved_at: "2026-11-10T11:11:51.999Z",
+    allowlist_sha256: "36dd204d44d49583b54bd3d1ac5419c8f24c9b1abd6d3ffa2d818abdfaa97232",
+    signer_key_id: "ed25519:267a6a2a921b986b0a1db88022f44da947be353b4f93e3242c5b39c3f5708632",
+    public_key: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvVvU5ZqOk3yjII9iF6QpD0T+AWDWWTsr34P7R9eXvk=\n-----END PUBLIC KEY-----\n",
+    signature: "2fkrcI5KghRr5DU/WMEgULzhHIQnWEo4PlvPCptwd+gIitxe3w7lfE11djV9D48J2LqJwgFVtyyQuc0e6f4BAg==",
+  },
+};
+
+/** entry_uuid + inclusion_proof of the ONE-TIME Rekor log entry for
+ *  PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST above (hashedrekord over
+ *  canonicalEvidenceJson(PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST)). `null` = not yet
+ *  submitted -- checkPreCutoffGrandfatheredAllowlist() below then rejects FAIL-CLOSED instead of
+ *  silently falling back to the old bare set check (no demo theater). Filled in once by the
+ *  private scripts/stapleGrandfatheredRevocationAllowlist.mjs after a real live submit against
+ *  rekor.sigstore.dev.
+ */
+export const PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY: RekorTlogEntryV1 | null = {
+  schema_version: "rekor-tlog-entry@1.0",
+  entry_uuid: "108e9186e8c5677a98c621f35bcc1cc3c0753605ec63f1275e276f6fcbb33c7279742bc0557b689b",
+  log_index: 3762397388,
+  log_id: "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+  integrated_time: 1794214362,
+  body: "eyJhcGlWZXJzaW9uIjoiMC4wLjEiLCJraW5kIjoiaGFzaGVkcmVrb3JkIiwic3BlYyI6eyJkYXRhIjp7Imhhc2giOnsiYWxnb3JpdGhtIjoic2hhMjU2IiwidmFsdWUiOiIxMjIzNWNmOWM3NjZjZjAyYmU4ZTBlMjkxODc4M2VlMTc1MDdiYmM3ZWJmM2U4ZTRkN2ExMzBhMGNmZDJlYTAwIn19LCJzaWduYXR1cmUiOnsiY29udGVudCI6Ik1FVUNJUUNIRHlUbzRwZmIyWHFvMFFCdHAyckNlZkZWWW5zaTVpUnVhTjVSSDZ1Z1hRSWdCRExWS3BlRWVla2FQL2E0dlZVNWNZc2Rtb0xmRkh1Sys5ZHFGS2Z3elVVPSIsInB1YmxpY0tleSI6eyJjb250ZW50IjoiTFMwdExTMUNSVWRKVGlCUVZVSk1TVU1nUzBWWkxTMHRMUzBLVFVacmQwVjNXVWhMYjFwSmVtb3dRMEZSV1VsTGIxcEplbW93UkVGUlkwUlJaMEZGWjFOdFRGQm5LMlZuTUdReFZFRnZjVk5GTWtoNGEzbFpWRXBNY1FwTlVuQTVNMmN5WldZeFJWcEhPRE53VVdwV1RVMU9aemxwTUZwcFRtOVdTbWgyU1hSRUsyRXllbk5RUlRoak1VRndjRzlCY0dSd1QwdDNQVDBLTFMwdExTMUZUa1FnVUZWQ1RFbERJRXRGV1MwdExTMHRDZz09In19fX0=",
+  inclusion_proof: {
+    log_index: 3640493126,
+    root_hash: "f3424501e0966b02718f567459b8235f566267a9ca9c2fcc8ee4432f6ff1939b",
+    tree_size: 3640493131,
+    hashes: [
+      "5266fd9f1085e1ff19513aa9d7720fa04fe50a6b71adb9e4be63f66b8246229b",
+      "8e73a5b040e452d462f14d890d454a028f38bc24bc560ddb6ef3c5218c1eb077",
+      "d0b7b570d08a5118ef81562402f89cad3b21a27219af259c288633902e2c37dc",
+      "8853f9ab4cd6dcc00a421d6728007ffc01b902023b6d148eaedaa0609e55c4e7",
+      "a149f350635e6d7b61cdb26298b8862e2c4438b9b311aa22b472669d4e989b28",
+      "1bece5a3b72146c6ed38012232870d48430cbae52108f8ce6cb12af297c107bf",
+      "318ee311bb0311992784c637c9ee28d733887b7b7c777a25ad18003c48a8d1a0",
+      "5eace4a2f72569a5392f8429af79612e2ff4f1a8a561cf1e59ab0e05c22e981c",
+      "1cff5d6bfcdff5fb96abe140a53930700cc53d6bb52a60d75e6026f40e6391af",
+      "4fd58d91e7ae847048661d46f2b163efaddcd5f7372f66a9cfa373fdc9c7490f",
+      "81a3519f61de2a76681dd56147633fa1bf5ce38adc1db96867b559b5a6cf8d95",
+      "34a2f6334f1935089142817fc096b88e0fe5dd0f65fb6ebc21206a032e0785e9",
+      "30981557d50213d5a8807bfe7bec3c359318878797f52aae2cc357935d81201c",
+      "b7a1171b79e3f6017f5aca9db92d724eaeb44e047887456e021e7689c5ad3db2",
+      "5cf7b1d68911dd07f55615ebfcb552a236a1f5c078475460bcafe646b99d58b6",
+      "4a58b19d2df806100efb2448d856863d23a1f55e8949534f7cb9756c7c6b7106",
+      "d436832b3ac234d061992758e6f163cfe369026c6661f60480109d3cbacc3f50",
+      "c47fc30ac78b1ebf5e2a8613f2ab0e4592bbcd5744198587b95b6c56b0fde706",
+    ],
+    checkpoint: "rekor.sigstore.dev - 1193050959916656506\n3640493131\n80JFAeCWawJxj1Z0WbgjX1ZiZ6nKnC/MjuRDL2/xk5s=\n\n— rekor.sigstore.dev wNI9ajBFAiEAoXGgMSFec7tV3IqCosUNeirEugZebkeeqNS+/YZrAPECIA53A6NCDX9zc6sUt7yzF20wKHSyvLbWF9LCnM7z6g0k\n",
+  },
+  submitted_at: "2026-11-09T08:52:44.286Z",
+};
+
+async function checkPreCutoffGrandfatheredAllowlist(contentHash: string): Promise<{ ok: boolean; reason?: string }> {
+  if (!PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST.content_hashes.includes(contentHash)) {
+    return { ok: false, reason: "revocation_missing_rekor_proof_not_grandfathered" };
+  }
+  if (!PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY) {
+    return { ok: false, reason: "grandfathered_allowlist_not_yet_witnessed_in_rekor" };
+  }
+  // approval_attestation is additive metadata, attached AFTER the already-permanent 2026-11-09
+  // Rekor entry -- that entry's artifact hash only binds schema_version/cutoff/content_hashes/
+  // note. Must be excluded here, otherwise any later-added attestation would break the
+  // already-logged entry (rekor_body_hash_mismatch).
+  const { approval_attestation: attestation, ...allowlistWithoutApproval } = PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST;
+  const artifact = Buffer.from(canonicalEvidenceJson(allowlistWithoutApproval), "utf8");
+  const staple = await verifyRekorInclusionForArtifact(artifact, PRE_CUTOFF_GRANDFATHERED_REVOCATION_ALLOWLIST_REKOR_ENTRY);
+  if (!staple.ok) return { ok: false, reason: `grandfathered_allowlist_proof_invalid_${staple.reason}` };
+  // 2026-11-10: second, independent anchor next to Rekor -- the same human-approval signer
+  // already pinned system-wide for approval_attestation. Looked up lazily (only here, not at
+  // every one of the 4 call sites unconditionally) because this branch is only reached for
+  // pre-cutoff revocations without their own rekor_tlog_entry.
+  if (!attestation) return { ok: false, reason: "grandfathered_allowlist_missing_approval_signature" };
+  const approvalConsensus = await crossCheckTrustAnchor("human_approval");
+  const trustedApprovalPublicKey = approvalConsensus.agreed_public_key_pem;
+  if (!trustedApprovalPublicKey) return { ok: false, reason: "grandfathered_allowlist_missing_approval_trust_anchor" };
+  const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = attestation;
+  if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) {
+    return { ok: false, reason: "grandfathered_allowlist_untrusted_approval_signer" };
+  }
+  if (approvalPayload.allowlist_sha256 !== sha256(JSON.stringify(allowlistWithoutApproval))) {
+    return { ok: false, reason: "grandfathered_allowlist_approval_hash_mismatch" };
+  }
+  if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) {
+    return { ok: false, reason: "grandfathered_allowlist_invalid_approval_signature" };
+  }
+  return { ok: true };
 }
 
 // 06.11.2026: uses computeEffectiveRevokedAt() above, only at the spot where a key is already
@@ -2446,6 +3060,9 @@ export async function checkSignerNotRevokedAfterEvidenceTime(
   if (record.rekor_tlog_entry) {
     const staple = await verifyRekorStapling(record);
     if (!staple.ok) return { ok: false, reason: `revocation_proof_invalid_${staple.reason}` };
+  } else {
+    const allowlisted = await checkPreCutoffGrandfatheredAllowlist(revocationRecordContentHash(record));
+    if (!allowlisted.ok) return allowlisted;
   }
   const effective = computeEffectiveRevokedAt(record);
   if (!effective || !evidenceTimeIso) return { ok: true };
