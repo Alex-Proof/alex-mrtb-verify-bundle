@@ -1,0 +1,20 @@
+{
+  "valid": {
+    "schema_version": "webauthn-approval-assertion@1.0",
+    "credential_id": "5WNwiI4gXQjugHo04F5Gj8IoI6m6rdeo8VvXNZPonzM",
+    "public_key": "pAEBAycgBiFYIMMrviL5ZlqoYGLtEfHctu8MQAml6sGxano9qiVKJdNh",
+    "signature": "PdhLm55iADMenxx-UOjtuLV-LGK8LEB0FK48fjHcas3kWTZI34Yh2pAgWWdLzknFgWNL3WLMYX4XEungp2DhDg",
+    "authenticator_data": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAw",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiVC1KeXBGOGI3R2JzcjZrOHZyT1ZmWjZDR0RUbmFFMG9KNVJQYnduMExSMCIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NDE4ODIiLCJjcm9zc09yaWdpbiI6ZmFsc2UsIm90aGVyX2tleXNfY2FuX2JlX2FkZGVkX2hlcmUiOiJkbyBub3QgY29tcGFyZSBjbGllbnREYXRhSlNPTiBhZ2FpbnN0IGEgdGVtcGxhdGUuIFNlZSBodHRwczovL2dvby5nbC95YWJQZXgifQ",
+    "counter": 3
+  },
+  "tampered": {
+    "schema_version": "webauthn-approval-assertion@1.0",
+    "credential_id": "5WNwiI4gXQjugHo04F5Gj8IoI6m6rdeo8VvXNZPonzM",
+    "public_key": "pAEBAycgBiFYIMMrviL5ZlqoYGLtEfHctu8MQAml6sGxano9qiVKJdNh",
+    "signature": "wthLm55iADMenxx-UOjtuLV-LGK8LEB0FK48fjHcas3kWTZI34Yh2pAgWWdLzknFgWNL3WLMYX4XEungp2DhDg",
+    "authenticator_data": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAw",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiVC1KeXBGOGI3R2JzcjZrOHZyT1ZmWjZDR0RUbmFFMG9KNVJQYnduMExSMCIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NDE4ODIiLCJjcm9zc09yaWdpbiI6ZmFsc2UsIm90aGVyX2tleXNfY2FuX2JlX2FkZGVkX2hlcmUiOiJkbyBub3QgY29tcGFyZSBjbGllbnREYXRhSlNPTiBhZ2FpbnN0IGEgdGVtcGxhdGUuIFNlZSBodHRwczovL2dvby5nbC95YWJQZXgifQ",
+    "counter": 3
+  }
+}
