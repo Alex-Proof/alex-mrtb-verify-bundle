@@ -1,22 +1,23 @@
 name: release
 
-<<<<<<< HEAD
-# Baut bei jedem Versions-Tag (v*) eigenstaendige, lokal lauffaehige Programmdateien fuer
-# Windows/macOS/Linux aus genau diesem Commit und veroeffentlicht sie mit SHA-256-Checksummen als
-# GitHub Release. Ersetzt NICHT den Quellcode als primaere Vertrauensquelle (siehe README
-# "Prebuilt binaries") -- jeder kann die Checksumme gegen den eigenen Build aus demselben Tag
-# nachrechnen (npm run build:sea), statt der Binary blind zu vertrauen.
+# Baut bei jedem Versions-Tag (v*.*.*) das signierte, SLSA-attestierte, unabhaengig
+# reproduzierbare Source-Tarball UND die eigenstaendigen SEA-Binaries fuer Windows/macOS/Linux
+# (siehe README "Prebuilt binaries"). Die Binaries sind bewusst unsigniert -- Checksumme gegen
+# den eigenen Build aus demselben Tag nachrechnen (npm ci && npm run build:sea), statt der
+# Binary blind zu vertrauen. Das Tarball ist weiterhin die primaere Vertrauensquelle.
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*.*.*"]
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  administration: read
 
 jobs:
-  build:
+  build-sea:
     strategy:
       matrix:
         include:
@@ -28,10 +29,10 @@ jobs:
             artifact: alex-verify-windows-x64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22.9"
+          node-version: "20.20.2"
       - run: npm ci
       - run: npm run build --silent
       - run: node scripts/build-sea.mjs ${{ matrix.artifact }}
@@ -44,7 +45,7 @@ jobs:
             shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
           fi
           cat "${{ matrix.artifact }}.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -53,41 +54,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist-binaries
-          merge-multiple: true
-      - name: SHA256SUMS.txt
-        run: cat dist-binaries/*.sha256 > dist-binaries/SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist-binaries/alex-verify-linux-x64
-            dist-binaries/alex-verify-macos-arm64
-            dist-binaries/alex-verify-windows-x64.exe
-            dist-binaries/SHA256SUMS.txt
-          body: |
-            Eigenstaendige, lokal lauffaehige Programmdateien fuer evidence-bundle/passport-card/
-            challenge-response-Pruefung (verdict-artifact-Pruefung braucht weiterhin den Quell-
-            Checkout, siehe README "Prebuilt binaries"). Unsigniert -- Checksumme in
-            SHA256SUMS.txt gegen den eigenen Build aus demselben Tag (npm ci && npm run build:sea)
-            nachrechnen, nicht blind vertrauen.
-=======
-on:
-  push:
-    tags: ["v*.*.*"]
-
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
-  administration: read
-
-jobs:
-  release:
+    needs: build-sea
     runs-on: ubuntu-latest
     outputs:
       asset_name: ${{ steps.package.outputs.asset_name }}
@@ -146,6 +113,14 @@ jobs:
             }' > "$snapshot_file"
           cat "$snapshot_file"
           echo "SNAPSHOT_NAME=${snapshot_file}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist-binaries
+          merge-multiple: true
+
+      - name: dist-binaries SHA256SUMS.txt
+        run: cat dist-binaries/*.sha256 > dist-binaries/SHA256SUMS.txt
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -219,6 +194,10 @@ jobs:
             ${{ env.SNAPSHOT_NAME }}.sig
             ${{ env.SNAPSHOT_NAME }}.pem
             SHA256SUMS
+            dist-binaries/alex-verify-linux-x64
+            dist-binaries/alex-verify-macos-arm64
+            dist-binaries/alex-verify-windows-x64.exe
+            dist-binaries/SHA256SUMS.txt
           generate_release_notes: true
 
       - name: Upload tarball for the independent rebuild-and-compare job
@@ -273,4 +252,3 @@ jobs:
             exit 1
           fi
           echo "Independent rebuild is byte-identical to the published release tarball."
->>>>>>> origin/main
