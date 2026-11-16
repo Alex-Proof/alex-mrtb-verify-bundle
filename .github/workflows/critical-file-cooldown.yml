@@ -1,0 +1,111 @@
+name: critical-file-cooldown
+
+# A single commit that edits the grandfathered-revocation allowlist and the
+# verifier together, in a repo with one maintainer, passes review the moment
+# it passes CI -- there is no second person to catch it. This workflow does
+# not pretend a reviewer exists. It buys a real, verifiable window instead:
+# a PR touching a security-critical file cannot merge until it has been
+# open, in public, for COOLDOWN_HOURS. That is the actual mitigation -- time
+# for someone outside the repo to look, not a theatrical approval step.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: "0 * * * *"
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+env:
+  COOLDOWN_HOURS: 24
+  CRITICAL_PATH_REGEX: '^(verify\.ts|verify\.py|\.github/allowed_signers|\.github/workflows/release\.yml|\.github/workflows/critical-file-cooldown\.yml|trust-anchor\.json)$'
+
+jobs:
+  # Runs once per open PR per hour, so a PR that only needed to wait out the
+  # clock goes green without anyone having to push a new commit.
+  recheck-open-prs:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-evaluate cooldown for every open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          for pr in $(gh pr list --repo "$repo" --state open --json number --jq '.[].number'); do
+            created_at="$(gh pr view "$pr" --repo "$repo" --json createdAt --jq .createdAt)"
+            sha="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)"
+            files="$(gh pr diff "$pr" --repo "$repo" --name-only || true)"
+
+            touches_critical=false
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if echo "$f" | grep -Eq "$CRITICAL_PATH_REGEX"; then
+                touches_critical=true
+              fi
+            done <<< "$files"
+
+            created_epoch="$(date -d "$created_at" +%s)"
+            now_epoch="$(date +%s)"
+            age_hours=$(( (now_epoch - created_epoch) / 3600 ))
+
+            if [ "$touches_critical" = false ]; then
+              state="success"; desc="No security-critical file touched"
+            elif [ "$age_hours" -ge "$COOLDOWN_HOURS" ]; then
+              state="success"; desc="Cooldown satisfied (open ${age_hours}h >= ${COOLDOWN_HOURS}h)"
+            else
+              state="pending"; desc="Cooldown: open ${age_hours}h/${COOLDOWN_HOURS}h on a security-critical file"
+            fi
+
+            gh api "repos/$repo/statuses/$sha" \
+              -f state="$state" \
+              -f context="critical-file-cooldown" \
+              -f description="$desc" >/dev/null
+            echo "PR #$pr sha=$sha -> $state ($desc)"
+          done
+
+  # Gives instant feedback on open/push instead of making the author wait a
+  # full hour for the first status.
+  check-this-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate cooldown for this PR
+        run: |
+          set -euo pipefail
+          files="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+
+          touches_critical=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if echo "$f" | grep -Eq "$CRITICAL_PATH_REGEX"; then
+              touches_critical=true
+            fi
+          done <<< "$files"
+
+          if [ "$touches_critical" = false ]; then
+            echo "No security-critical file touched -- no cooldown required."
+            exit 0
+          fi
+
+          created_at="${{ github.event.pull_request.created_at }}"
+          created_epoch="$(date -d "$created_at" +%s)"
+          now_epoch="$(date +%s)"
+          age_hours=$(( (now_epoch - created_epoch) / 3600 ))
+
+          echo "Touches a security-critical file. Open for ${age_hours}h, needs ${COOLDOWN_HOURS}h."
+          if [ "$age_hours" -ge "$COOLDOWN_HOURS" ]; then
+            echo "Cooldown satisfied."
+            exit 0
+          fi
+
+          echo "::error::Cooldown not yet satisfied -- this PR touches a security-critical file and must stay open for public review before it can merge. The hourly scheduled check flips this green once ${COOLDOWN_HOURS}h have passed, no new commit needed."
+          exit 1
