@@ -136,6 +136,164 @@ def openssl_verify(public_key: str, payload: bytes, signature_b64: str) -> bool:
         return False
 
 
+def _base64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+# Minimaler COSE_Key-Parser (RFC 9053), identisches Pendant zu parseCoseEcOrOkpPublicKey() in
+# verify.ts -- nur fuer OKP/Ed25519 (kty=1, alg=-8, crv=6, Feld -1 "x") und EC2/ECDSA-P256
+# (kty=2, alg=-7, crv=1, Felder -1 "x"/-2 "y"). Kein generischer CBOR-Decoder, keine neue pip-
+# Dependency (spec/webauthn-approval-assertion@1.0.md).
+def _parse_cose_ec_or_okp_public_key(cose_key_base64: str) -> dict[str, Any]:
+    buf = base64.b64decode(cose_key_base64, validate=True)
+    offset = 0
+
+    def read_uint() -> int:
+        nonlocal offset
+        byte = buf[offset]
+        if byte <= 0x17:
+            offset += 1
+            return byte
+        if byte == 0x18:
+            offset += 1
+            value = buf[offset]
+            offset += 1
+            return value
+        raise ValueError("cose_unsupported_uint_encoding")
+
+    def read_int() -> int:
+        nonlocal offset
+        byte = buf[offset]
+        if 0x00 <= byte <= 0x17:
+            return read_uint()
+        if 0x20 <= byte <= 0x37:
+            offset += 1
+            return -1 - (byte - 0x20)
+        if byte == 0x38:
+            offset += 1
+            value = buf[offset]
+            offset += 1
+            return -1 - value
+        raise ValueError("cose_unsupported_int_encoding")
+
+    def read_bytes() -> bytes:
+        nonlocal offset
+        byte = buf[offset]
+        if 0x40 <= byte <= 0x57:
+            length = byte - 0x40
+            offset += 1
+        elif byte == 0x58:
+            offset += 1
+            length = buf[offset]
+            offset += 1
+        else:
+            raise ValueError("cose_unsupported_bytestring_encoding")
+        value = bytes(buf[offset:offset + length])
+        offset += length
+        return value
+
+    header = buf[offset]
+    if not (0xA0 <= header <= 0xB7):
+        raise ValueError("cose_not_a_map")
+    entry_count = header - 0xA0
+    offset += 1
+
+    kty: int | None = None
+    alg: int | None = None
+    crv: int | None = None
+    x: bytes | None = None
+    y: bytes | None = None
+    for _ in range(entry_count):
+        key = read_int()
+        if key == 1:
+            kty = read_uint()
+        elif key == 3:
+            alg = read_int()
+        elif key == -1:
+            crv = read_uint()
+        elif key == -2:
+            x = read_bytes()
+        elif key == -3:
+            y = read_bytes()
+        else:
+            raise ValueError(f"cose_unknown_key:{key}")
+    if kty is None or alg is None or crv is None or x is None:
+        raise ValueError("cose_missing_fields")
+    return {"kty": kty, "alg": alg, "crv": crv, "x": x, "y": y}
+
+
+# Feste SPKI-DER-Praefixe (RFC 5280/8032/5480), identisches Pendant zu coseToPublicKeyObject() in
+# verify.ts -- Node importiert COSE-Keys ueber JWK, OpenSSL (kein cryptography-Paket in dieser
+# Codebase) braucht dagegen eine PEM-Datei, deshalb hier der Umweg ueber eine handgebaute DER-
+# Struktur statt einer neuen Dependency.
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_P256_SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+
+
+def _cose_to_public_key_pem_and_digest(cose: dict[str, Any]) -> tuple[str, str | None]:
+    if cose["kty"] == 1 and cose["alg"] == -8 and cose["crv"] == 6:
+        der = _ED25519_SPKI_PREFIX + cose["x"]
+        digest = None
+    elif cose["kty"] == 2 and cose["alg"] == -7 and cose["crv"] == 1 and cose["y"] is not None:
+        der = _P256_SPKI_PREFIX + b"\x04" + cose["x"] + cose["y"]
+        digest = "sha256"
+    else:
+        raise ValueError("cose_unsupported_algorithm")
+    pem = "-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(der).decode("ascii") + "-----END PUBLIC KEY-----\n"
+    return pem, digest
+
+
+def _openssl_verify_raw(public_key_pem: str, payload: bytes, signature: bytes, digest: str | None) -> bool:
+    try:
+        with tempfile.TemporaryDirectory(prefix="alex_verify_webauthn_") as directory:
+            key_path = os.path.join(directory, "key.pem")
+            payload_path = os.path.join(directory, "payload.bin")
+            signature_path = os.path.join(directory, "signature.bin")
+            with open(key_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(public_key_pem)
+            with open(payload_path, "wb") as handle:
+                handle.write(payload)
+            with open(signature_path, "wb") as handle:
+                handle.write(signature)
+            cmd = ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", key_path, "-rawin"]
+            if digest:
+                cmd += ["-digest", digest]
+            cmd += ["-in", payload_path, "-sigfile", signature_path]
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return result.returncode == 0
+    except OSError:
+        return False
+
+
+# Python-Pendant zu verifyWebauthnApprovalAssertionV1() in verify.ts (A-016, 15.11.2026). Prueft
+# signature gegen authenticator_data || sha256(client_data_json) mit dem eingebetteten COSE-Public-
+# Key. Keine Challenge-/Origin-Pruefung, siehe spec/webauthn-approval-assertion@1.0.md.
+def verify_webauthn_approval_assertion_v1(assertion: dict[str, Any]) -> tuple[bool, str | None]:
+    if assertion.get("schema_version") != "webauthn-approval-assertion@1.0":
+        return False, "unsupported_webauthn_assertion_schema"
+    try:
+        cose = _parse_cose_ec_or_okp_public_key(str(assertion.get("public_key", "")))
+    except (ValueError, TypeError, IndexError):
+        return False, "cose_parse_failed"
+    try:
+        public_key_pem, digest = _cose_to_public_key_pem_and_digest(cose)
+    except ValueError as error:
+        return False, str(error) if str(error) else "unsupported_cose_algorithm"
+
+    try:
+        authenticator_data = _base64url_decode(str(assertion.get("authenticator_data", "")))
+        client_data_json = _base64url_decode(str(assertion.get("client_data_json", "")))
+        signature = _base64url_decode(str(assertion.get("signature", "")))
+    except (ValueError, TypeError):
+        return False, "invalid_webauthn_assertion_encoding"
+    client_data_hash = hashlib.sha256(client_data_json).digest()
+    signed_data = authenticator_data + client_data_hash
+
+    if _openssl_verify_raw(public_key_pem, signed_data, signature, digest):
+        return True, None
+    return False, "invalid_webauthn_assertion"
+
+
 def verify_rfc3161_binding(bundle: dict[str, Any]) -> tuple[bool, str | None]:
     timestamp = bundle.get("rfc3161_timestamp")
     if not isinstance(timestamp, dict):
@@ -1451,6 +1609,16 @@ def verify_verifier_binding_manifest_v1(manifest: dict[str, Any], bundle: dict[s
         if not chain_ok:
             return False, f"rfc3161_tsa_{chain_reason or 'invalid'}"
 
+    # A-016 (15.11.2026, spec/webauthn-approval-assertion@1.0.md G3): fehlendes Feld bleibt
+    # folgenlos (reiner Token-Pfad); vorhandenes aber kryptographisch ungueltiges Feld ist ein
+    # Gesamt-Fail, bewusst konsistent mit approval_attestation/rfc3161_timestamp oben.
+    controller_evidence = bundle.get("controller_evidence") or {}
+    webauthn_assertion = controller_evidence.get("webauthn_approval_assertion")
+    if webauthn_assertion:
+        webauthn_ok, webauthn_reason = verify_webauthn_approval_assertion_v1(webauthn_assertion)
+        if not webauthn_ok:
+            return False, webauthn_reason or "invalid_webauthn_assertion"
+
     return True, None
 
 
@@ -1603,6 +1771,16 @@ def main() -> int:
                 checks["rfc3161_chain"] = "ok" if chain_ok else (chain_reason or "failed")
         else:
             checks["rfc3161_binding"] = "not_applicable_no_timestamp"
+        # A-016 (15.11.2026, spec/webauthn-approval-assertion@1.0.md): optionale Zusatzbeweisschicht
+        # wie rfc3161_timestamp, kein Pflichtfeld -- Warnung statt Gesamt-Fail im Default-Pfad,
+        # identisches Pendant zum TS-Block in main() (verify.ts). Innerhalb von
+        # verify_verifier_binding_manifest_v1() bleibt es dagegen Gesamt-Fail, siehe dort.
+        webauthn_assertion = (bundle.get("controller_evidence") or {}).get("webauthn_approval_assertion")
+        if webauthn_assertion:
+            webauthn_ok, webauthn_reason = verify_webauthn_approval_assertion_v1(webauthn_assertion)
+            checks["webauthn_assertion"] = "ok" if webauthn_ok else (webauthn_reason or "failed")
+        else:
+            checks["webauthn_assertion"] = "not_applicable_no_webauthn_assertion"
         print(json.dumps({"checks": checks}, indent=2))
         if args.policy:
             with open(args.policy, encoding="utf-8") as handle:
