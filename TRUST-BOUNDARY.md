@@ -53,3 +53,40 @@ This describes what the mechanism does, not a claim that it needs no further wor
 honestly-named gaps: (1) no separate Issuer-identity abstraction beyond the raw key; (2) no
 automated historical-key resolution in the verifier itself. Both are real, both are open, neither
 is hidden.
+
+## The release-tag signing key (a separate trust domain from the Evidence/Approval keys above)
+
+**Status:** current, 2026-11-16. Written in response to a direct question from an external
+reviewer (Bluesky) following the cosign/OIDC and `allowed_signers` work: does this key live
+outside GitHub Actions, and what rotates or revokes it?
+
+This key is unrelated to the Ed25519 Evidence/Approval keys documented above. It is the SSH key
+`git verify-tag` checks a release tag's signature against (`.github/allowed_signers`,
+`git config gpg.ssh.allowedSignersFile`, enforced in `release.yml` before the build/package job
+runs). Today there is exactly one entry, one SSH key, held by the repository's sole maintainer.
+
+**Custody — confirmed by reading the workflow, not asserted:** `release.yml` contains no
+`secrets.*` reference anywhere. The private key is never uploaded as a repository/organization
+secret and is not reachable by any Actions runner. Tags are signed locally, before the signed tag
+is pushed; CI only verifies (`git verify-tag`), it never signs. A compromised `release.yml` could
+at most forge a build around an already-valid tag — it cannot mint a new valid tag signature,
+because the signing key never enters the CI environment.
+
+**Rotation/revocation — reuses existing machinery, not a new one:** `.github/allowed_signers`
+is itself a file in this repository, and `main` already requires `required_signatures: true` and
+`enforce_admins: true` (no bypass, including for the maintainer). Replacing or adding a key means
+editing this file through a signed commit on a reviewed PR — the same path, and the same
+guarantees, as any other change to this repository. A separate PR (#17, open) adds a 24-hour
+public-cooldown requirement specifically for this file (and for `verify.ts`/`verify.py`/
+`release.yml`/`trust-anchor.json`) before it can merge; **honestly stated: that check is not yet a
+required status context in branch protection**, so until #17 merges and is added as a required
+check, a key rotation technically only needs a signed commit, not 24h of public visibility first.
+There is no separate witnessed-registry/append-only-log construction for this key, unlike the
+Evidence/Approval key revocations above — it was judged unnecessary here because the control
+already in place (signed-commit-only, no admin bypass, on a single-maintainer repo) is the actual
+bottleneck, and a second logging layer around it would not change who can authorize a change,
+only how visibly they did it.
+
+**What this does not cover:** if the maintainer's own SSH key or GitHub account is compromised,
+this entire boundary collapses — same single-point-of-trust limit as the rest of this repo's
+model (see the top of this document). Nothing here claims otherwise.
