@@ -550,6 +550,117 @@ interface DevTaskControllerEvidenceV2 {
   agent_run_id: string | null;
   repository_state?: RepositoryStateEvidenceV1 | null;
   test_integrity_policy?: TestIntegrityPolicyEvidenceV1;
+  /** A-016 (15.11.2026), identische Definition wie core/mrtb/evidenceBundle.server.ts: rohe
+   *  WebAuthn-Signatur-Assertion einer Passkey-Freigabe. Additiv, leer/fehlend bei jeder Freigabe
+   *  ueber den reinen Token-Pfad -- siehe verifyWebauthnApprovalAssertionV1() unten. */
+  webauthn_approval_assertion?: WebauthnApprovalAssertionV1;
+}
+
+export interface WebauthnApprovalAssertionV1 {
+  schema_version: "webauthn-approval-assertion@1.0";
+  credential_id: string;
+  public_key: string;
+  signature: string;
+  authenticator_data: string;
+  client_data_json: string;
+  counter: number;
+}
+
+/** Minimaler COSE_Key-Parser (RFC 9053), nur fuer die beiden Algorithmen, die WebAuthn-
+ *  Authenticator ueblicherweise verwenden: OKP/Ed25519 (kty=1, alg=-8, crv=6, Feld -1 "x") und
+ *  EC2/ECDSA-P256 (kty=2, alg=-7, crv=1, Felder -1 "x"/-2 "y"). Bewusst kein generischer CBOR-
+ *  Decoder und keine neue Dependency (spec/webauthn-approval-assertion@1.0.md) -- liest nur
+ *  Map-Header, kleine (un)signierte Integer und kurze Byte-Strings, exakt die Teilmenge, die diese
+ *  beiden COSE-Key-Formen benutzen. */
+function parseCoseEcOrOkpPublicKey(coseKeyBase64: string): { kty: number; alg: number; crv: number; x: Buffer; y?: Buffer } {
+  const buf = Buffer.from(coseKeyBase64, "base64");
+  let offset = 0;
+  const readUint = (): number => {
+    const byte = buf[offset];
+    if (byte === undefined) throw new Error("cose_truncated");
+    if (byte <= 0x17) { offset += 1; return byte; }
+    if (byte === 0x18) { offset += 1; const v = buf[offset]; offset += 1; return v; }
+    throw new Error("cose_unsupported_uint_encoding");
+  };
+  const readInt = (): number => {
+    const byte = buf[offset];
+    if (byte === undefined) throw new Error("cose_truncated");
+    if (byte >= 0x00 && byte <= 0x17) return readUint();
+    if (byte >= 0x20 && byte <= 0x37) { offset += 1; return -1 - (byte - 0x20); }
+    if (byte === 0x38) { offset += 1; const v = buf[offset]; offset += 1; return -1 - v; }
+    throw new Error("cose_unsupported_int_encoding");
+  };
+  const readBytes = (): Buffer => {
+    const byte = buf[offset];
+    if (byte === undefined) throw new Error("cose_truncated");
+    let length: number;
+    if (byte >= 0x40 && byte <= 0x57) { length = byte - 0x40; offset += 1; }
+    else if (byte === 0x58) { offset += 1; length = buf[offset]; offset += 1; }
+    else throw new Error("cose_unsupported_bytestring_encoding");
+    const value = buf.subarray(offset, offset + length);
+    offset += length;
+    return Buffer.from(value);
+  };
+
+  const header = buf[offset];
+  if (header === undefined || header < 0xa0 || header > 0xb7) throw new Error("cose_not_a_map");
+  const entryCount = header - 0xa0;
+  offset += 1;
+
+  let kty: number | undefined, alg: number | undefined, crv: number | undefined, x: Buffer | undefined, y: Buffer | undefined;
+  for (let i = 0; i < entryCount; i += 1) {
+    const key = readInt();
+    if (key === 1) kty = readUint();
+    else if (key === 3) alg = readInt();
+    else if (key === -1) crv = readUint();
+    else if (key === -2) x = readBytes();
+    else if (key === -3) y = readBytes();
+    else throw new Error(`cose_unknown_key:${key}`);
+  }
+  if (kty === undefined || alg === undefined || crv === undefined || !x) throw new Error("cose_missing_fields");
+  return { kty, alg, crv, x, ...(y ? { y } : {}) };
+}
+
+/** Baut aus dem geparsten COSE-Key ein Node-KeyObject -- ueber das JWK-Format, nicht ueber
+ *  manuelles DER/PEM, da Node createPublicKey() sowohl OKP (Ed25519) als auch EC-JWKs direkt
+ *  importieren kann. */
+function coseToPublicKeyObject(cose: { kty: number; alg: number; crv: number; x: Buffer; y?: Buffer }): { keyObject: ReturnType<typeof createPublicKey>; verifyAlgorithm: string | null } {
+  if (cose.kty === 1 && cose.alg === -8 && cose.crv === 6) {
+    return {
+      keyObject: createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: cose.x.toString("base64url") }, format: "jwk" }),
+      verifyAlgorithm: null,
+    };
+  }
+  if (cose.kty === 2 && cose.alg === -7 && cose.crv === 1 && cose.y) {
+    return {
+      keyObject: createPublicKey({ key: { kty: "EC", crv: "P-256", x: cose.x.toString("base64url"), y: cose.y.toString("base64url") }, format: "jwk" }),
+      verifyAlgorithm: "sha256",
+    };
+  }
+  throw new Error("cose_unsupported_algorithm");
+}
+
+/** Prueft die rohe WebAuthn-Signatur-Assertion einer Passkey-Freigabe (A-016) unabhaengig vom
+ *  ALEX-Server nach: signature muss gueltig sein ueber authenticator_data || sha256(client_data_json),
+ *  gegen den im Feld eingebetteten COSE-Public-Key. Keine Challenge-/Origin-Pruefung (die Challenge
+ *  ist zum Pruefzeitpunkt laengst verbraucht, siehe spec/webauthn-approval-assertion@1.0.md,
+ *  "Out of scope"). */
+export function verifyWebauthnApprovalAssertionV1(assertion: WebauthnApprovalAssertionV1): { ok: boolean; reason?: string } {
+  if (assertion.schema_version !== "webauthn-approval-assertion@1.0") return { ok: false, reason: "unsupported_webauthn_assertion_schema" };
+  let cose: ReturnType<typeof parseCoseEcOrOkpPublicKey>;
+  try { cose = parseCoseEcOrOkpPublicKey(assertion.public_key); }
+  catch (error) { return { ok: false, reason: error instanceof Error ? error.message : "cose_parse_failed" }; }
+  let keyObject: ReturnType<typeof createPublicKey>, verifyAlgorithm: string | null;
+  try { ({ keyObject, verifyAlgorithm } = coseToPublicKeyObject(cose)); }
+  catch (error) { return { ok: false, reason: error instanceof Error ? error.message : "unsupported_cose_algorithm" }; }
+
+  const authenticatorData = Buffer.from(assertion.authenticator_data, "base64url");
+  const clientDataHash = createHash("sha256").update(Buffer.from(assertion.client_data_json, "base64url")).digest();
+  const signedData = Buffer.concat([authenticatorData, clientDataHash]);
+  const signature = Buffer.from(assertion.signature, "base64url");
+
+  const valid = verify(verifyAlgorithm, signedData, keyObject, signature);
+  return valid ? { ok: true } : { ok: false, reason: "invalid_webauthn_assertion" };
 }
 
 export interface VerdictArtifactV1 {
@@ -730,6 +841,15 @@ export function verifyVerifierBindingManifestV1(
     if (!binding.ok) return { ok: false, reason: `rfc3161_${binding.reason ?? "invalid"}` };
     const chain = verifyRfc3161TsaChain(bundle.rfc3161_timestamp);
     if (!chain.ok) return { ok: false, reason: `rfc3161_tsa_${chain.reason ?? "invalid"}` };
+  }
+
+  // A-016 (15.11.2026, spec/webauthn-approval-assertion@1.0.md G3): fehlendes Feld bleibt
+  // folgenlos (reiner Token-Pfad); vorhandenes aber kryptographisch ungueltiges Feld ist ein
+  // Gesamt-Fail dieser Funktion -- bewusst konsistent mit approval_attestation/rfc3161_timestamp
+  // oben, nicht nur ein isolierter Warn-Code.
+  if (bundle.controller_evidence?.webauthn_approval_assertion) {
+    const webauthnCheck = verifyWebauthnApprovalAssertionV1(bundle.controller_evidence.webauthn_approval_assertion);
+    if (!webauthnCheck.ok) return { ok: false, reason: webauthnCheck.reason ?? "invalid_webauthn_assertion" };
   }
 
   return { ok: true };
@@ -3717,6 +3837,25 @@ async function main() {
     }
   } else {
     checks.rfc3161_binding = "not_applicable_no_timestamp";
+  }
+
+  // A-016 (15.11.2026, spec/webauthn-approval-assertion@1.0.md): anders als innerhalb von
+  // verifyVerifierBindingManifestV1() (dort Gesamt-Fail, gleiche Begruendung wie approval_attestation
+  // dort) ist dies im Default-Pfad eine optionale Zusatzbeweisschicht wie rfc3161_timestamp/
+  // observer_receipt, kein Pflichtfeld -- Andre, 15.11.2026, nach Vorlage beider Optionen: "das
+  // beste davon bitte" (empfohlene Option: Warnung statt Gesamt-Fail, konsistent mit dem
+  // tatsaechlichen Pattern dieses Pfades).
+  if (bundle.controller_evidence?.webauthn_approval_assertion) {
+    const webauthnResult = verifyWebauthnApprovalAssertionV1(bundle.controller_evidence.webauthn_approval_assertion);
+    if (webauthnResult.ok) {
+      console.log("   WebAuthn-Freigabe-Assertion unabhaengig verifiziert (Signatur passt zum eingebetteten Public Key).");
+      checks.webauthn_assertion = "ok";
+    } else {
+      console.warn(`   ⚠ WebAuthn-Freigabe-Assertion vorhanden, aber NICHT verifiziert: ${webauthnResult.reason} -- ignoriert, Urteil oben bleibt unveraendert.`);
+      checks.webauthn_assertion = webauthnResult.reason ?? "failed";
+    }
+  } else {
+    checks.webauthn_assertion = "not_applicable_no_webauthn_assertion";
   }
 
   if (bundle.observer_receipt) {

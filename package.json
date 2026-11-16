@@ -35,7 +35,8 @@
     "test": "npm run build --silent && node --test test/*.test.mjs",
     "verify": "npm run build --silent && node dist/verify.js",
     "verify:python": "python3 verify.py",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "build:sea": "npm run build --silent && node scripts/build-sea.mjs"
   },
   "dependencies": {
     "@peculiar/asn1-cms": "^2.9.4",
@@ -47,6 +48,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "~5.8.2"
   }
 }
