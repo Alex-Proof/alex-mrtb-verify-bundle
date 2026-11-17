@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "@peculiar/asn1-cms"
+      - dependency-name: "@peculiar/asn1-schema"
+      - dependency-name: "@peculiar/asn1-tsp"
+      - dependency-name: "@peculiar/asn1-x509"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

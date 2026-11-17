@@ -63,6 +63,17 @@ Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`
 
 ## Änderungsverlauf
 
+**Zuletzt bearbeitet:** 2026-11-17 (Action-SHA-Pins + Dependabot)
+**Von:** Alex-Proof
+
+`test.yml` nutzte als einziger Workflow noch Tag-Referenzen (`actions/checkout@v4`,
+`actions/setup-node@v4`, `actions/setup-python@v5`) statt der vollen Commit-SHA, die
+`release.yml`/`critical-file-cooldown.yml` bereits verwenden -- jetzt auf dieselben SHAs
+umgestellt. Zusaetzlich `.github/dependabot.yml` neu angelegt: woechentliches npm-Update
+gezielt fuer die vier `@peculiar/asn1-*`-Pakete (`asn1-cms`, `asn1-schema`, `asn1-tsp`,
+`asn1-x509`) sowie ein `github-actions`-Eintrag, damit zukuenftige SHA-Pins nicht unbemerkt
+veralten.
+
 **Zuletzt bearbeitet:** 2026-11-17 (CI-Badge)
 **Von:** Alex-Proof
 
