@@ -62,6 +62,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      # allowed_signers is a plain file in this repo, editable by the same key
+      # it authorizes -- a commit that adds a second line and signs itself
+      # with the key being replaced would satisfy the "Require a signed tag"
+      # step below on its own. Pinning its hash against a GitHub Actions
+      # secret closes that: the secret lives behind the GitHub account/API,
+      # a boundary a stolen SSH signing key alone does not cross. Rotating
+      # the real key means updating this secret out-of-band too -- see
+      # TRUST-BOUNDARY.md.
+      - name: Verify allowed_signers matches the pinned hash
+        env:
+          EXPECTED_SHA256: ${{ secrets.ALLOWED_SIGNERS_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPECTED_SHA256:-}" ]; then
+            echo "::error::ALLOWED_SIGNERS_SHA256 secret is not set -- refusing to trust .github/allowed_signers without a pin." >&2
+            exit 1
+          fi
+          actual="$(sha256sum .github/allowed_signers | cut -d' ' -f1)"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::.github/allowed_signers does not match the pinned hash. expected=${EXPECTED_SHA256} actual=${actual}. If this is a deliberate key rotation, update the ALLOWED_SIGNERS_SHA256 secret out-of-band first." >&2
+            exit 1
+          fi
+          echo "allowed_signers matches pinned hash (${actual})."
+
       - name: Require a signed tag
         run: |
           set -euo pipefail
