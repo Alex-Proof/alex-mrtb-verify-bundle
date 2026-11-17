@@ -1,5 +1,7 @@
 # Independent Evidence Bundle Verifier
 
+[![test](https://github.com/Alex-Proof/alex-mrtb-verify-bundle/actions/workflows/test.yml/badge.svg)](https://github.com/Alex-Proof/alex-mrtb-verify-bundle/actions/workflows/test.yml)
+
 Der wichtigste Unabhaengigkeitstest ist als reproduzierbares Paket unter `independence/`
 dokumentiert: offline, auf einem fremden Linux-System und bei vollstaendig gestoppter
 ALEX-Runtime.
@@ -60,6 +62,13 @@ Mehr Hintergrund und die drei reproduzierbaren Unabhaengigkeitstests (offline, a
 Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`](independence/).
 
 ## Änderungsverlauf
+
+**Zuletzt bearbeitet:** 2026-11-17 (CI-Badge)
+**Von:** Alex-Proof
+
+CI-Status-Badge oben ergaenzt (verlinkt auf `test.yml`-Workflow-Laeufe) -- Branch Protection auf
+`main` existiert bereits seit 13.11. (siehe Eintrag unten), nur die sichtbare Verknuepfung im
+README fehlte noch.
 
 **Zuletzt bearbeitet:** 2026-11-13 (signierter Branch-Protection-Snapshot pro Release)
 **Von:** Alex-Proof
