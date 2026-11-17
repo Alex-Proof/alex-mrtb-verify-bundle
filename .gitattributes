@@ -4,3 +4,4 @@
 *.json text eol=lf
 *.pem text eol=lf
 SHA256SUMS text eol=lf
+.github/allowed_signers text eol=lf
