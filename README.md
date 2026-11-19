@@ -689,6 +689,31 @@ Supported capability traces:
   einen extern gelieferten Trust-Anchor und — bei R3/R4 — eine Sandbox-Attestierung. Fehlende
   Pflichtbelege ergeben `INCONCLUSIVE`; ältere V1-Bundles bleiben unverändert prüfbar.
 
+## Running in a sandbox without git/network access
+
+The TypeScript verifier's default path for `devtask.execution@1.0` V2 bundles with a
+`github_pr`-shaped `result_reference` spawns `git` to independently fetch both commits from
+github.com and re-derive the diff hash -- a real, unabstracted cross-check against the signed
+`diff_full_sha256`, not just a self-consistency check. In an environment that denies process
+spawn or network egress (a read-only/no-network sandbox, exactly the kind used to audit this
+verifier itself in isolation), that check fails with `git_operation_failed:...` and exit code 5.
+
+`ALEX_VERIFY_SKIP_GITHUB_DIFF=1` skips it deliberately, printing an unmissable warning instead of
+silently passing:
+
+```bash
+ALEX_VERIFY_SKIP_GITHUB_DIFF=1 node dist/verify.js bundle.json trusted-evidence.pem
+```
+
+This does not weaken what the verifier otherwise checks -- it only drops the one check that
+needs outbound network access. The diff is still bound cryptographically inside the bundle via
+`diff_full_sha256`; an independent reviewer can always re-derive and compare that hash from their
+own, separately fetched copy of the two commits, exactly as the `independence/` kit's own test
+protocols do.
+
+The Python verifier (`verify.py`) never performs this cross-check at all and needs no equivalent
+flag -- a pre-existing, documented TS-only capability, not a parity gap introduced here.
+
 ## Exact computation rule (hash chain + signature payload)
 
 Written out explicitly so this is reproducible without reading the TypeScript source:
