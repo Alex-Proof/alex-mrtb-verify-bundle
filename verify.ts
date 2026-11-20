@@ -3734,6 +3734,9 @@ async function main() {
       console.log(`   GitHub-Diff-Gegenpruefung uebersprungen (${diffCheck.reason}) -- kein pruefbarer github_pr-Verweis im Bundle.`);
     } else {
       console.error(`❌ GitHub-Diff-Gegenpruefung fehlgeschlagen: ${diffCheck.reason}`);
+      if (diffCheck.reason?.startsWith("git_operation_failed:")) {
+        console.error("   Laeuft dieser Verifier in einer Sandbox ohne git-Binary/Netzwerkzugriff? ALEX_VERIFY_SKIP_GITHUB_DIFF=1 ueberspringt die Gegenpruefung bewusst (siehe README) -- die Diff-Aussage ist dann nicht unabhaengig bestaetigt.");
+      }
       process.exitCode = 5;
       return;
     }
