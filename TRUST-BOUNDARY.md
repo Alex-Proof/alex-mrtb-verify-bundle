@@ -122,11 +122,12 @@ because the signing key never enters the CI environment.
 is itself a file in this repository, and `main` already requires `required_signatures: true` and
 `enforce_admins: true` (no bypass, including for the maintainer). Replacing or adding a key means
 editing this file through a signed commit on a reviewed PR — the same path, and the same
-guarantees, as any other change to this repository. A separate PR (#17, open) adds a 24-hour
-public-cooldown requirement specifically for this file (and for `verify.ts`/`verify.py`/
-`release.yml`/`trust-anchor.json`) before it can merge; **honestly stated: that check is not yet a
-required status context in branch protection**, so until #17 merges and is added as a required
-check, a key rotation technically only needs a signed commit, not 24h of public visibility first.
+guarantees, as any other change to this repository. `critical-file-cooldown.yml` (merged, #17)
+adds a 24-hour public-cooldown requirement specifically for this file (and for `verify.ts`/
+`verify.py`/`release.yml`/`trust-anchor.json`); **honestly stated: that check is merged but not
+yet added as a required status context in branch protection** (still only `test` is required), so
+today a key rotation technically only needs a signed commit, not 24h of public visibility first --
+the workflow runs and reports a status on every PR already, but nothing yet blocks a merge on it.
 There is no separate witnessed-registry/append-only-log construction for this key, unlike the
 Evidence/Approval key revocations above — it was judged unnecessary here because the control
 already in place (signed-commit-only, no admin bypass, on a single-maintainer repo) is the actual
