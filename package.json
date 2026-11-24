@@ -42,7 +42,7 @@
     "@peculiar/asn1-cms": "^2.9.4",
     "@peculiar/asn1-schema": "^2.9.4",
     "@peculiar/asn1-tsp": "^2.9.4",
-    "@peculiar/asn1-x509": "^2.9.4",
+    "@peculiar/asn1-x509": "^3.1.0",
     "@sigstore/verify": "3.1.1",
     "zod": "^4.5.4"
   },
