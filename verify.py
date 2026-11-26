@@ -1004,7 +1004,14 @@ def build_customer_summary_de(input_: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key: str | None = None) -> tuple[bool, str]:
+def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key: str | None = None,
+           example_evidence_key: str | None = None) -> tuple[bool, str]:
+    # 26.11.2026 (A-043, Parity zu verifyBundleObject() in verify.ts): example_evidence_key ist rein
+    # additiv und NIE live aus der Registry geholt (dieser Verifier macht nie einen frischen
+    # Netzwerkaufruf) -- muss als lokale PEM-Datei uebergeben werden. Klassifiziert ein mit dem
+    # dedizierten example_evidence-Key signiertes Bundle als "verified:example_evidence_only" statt
+    # untrusted_signer oder einem nicht unterscheidbaren blossen "verified".
+    classification: str | None = None
     # 06.11.2026 (externe Kritik, GitHub-Issue #10): receipt_chain_entry (ADR 06 / vNext 4.12)
     # haengt als AEUSSERSTE Schicht an und war nie Teil der signierten Nutzlast -- fehlte hier
     # bisher komplett, identisch zu withoutReceiptChainEntry() in verify.ts. Ohne diesen Strip
@@ -1052,7 +1059,14 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
         # 06.11.2026 (Issue #9, Parity zu verifyBundleObject(), identisches Muster wie der
         # Issue-#2/#3-Fix): Legacy-Signaturpfad -- nur gepinnt, wenn trusted_key ueberhaupt
         # uebergeben wurde. Ein Aufruf OHNE trusted_key (None) bleibt unveraendert.
-        return False, "untrusted_signer"
+        if example_evidence_key is not None and embedded == example_evidence_key:
+            classification = "example_evidence_only"
+        else:
+            return False, "untrusted_signer"
+    # 26.11.2026 (A-043): deckt den Selbstkonsistenz-Pfad ab (gar kein trusted_key uebergeben),
+    # identisch zu verifyBundleObject().
+    if classification is None and example_evidence_key is not None and embedded == example_evidence_key:
+        classification = "example_evidence_only"
     # Signaturpruefung laeuft immer gegen den EINGEBETTETEN public_key (nicht trusted_key direkt):
     # fuer is_v2 sind beide ohnehin identisch (gerade erst erzwungen), fuer den ungepinnten
     # Legacy-Pfad ist trusted_key None und nur embedded ist ueberhaupt ein gueltiger Schluessel.
@@ -1174,7 +1188,7 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
     # von verifyBundleObject() in verify.ts.
     if bundle.get("outcome") != "verified":
         return False, f"non_verified_outcome:{bundle.get('outcome')}"
-    return True, "verified"
+    return True, f"verified:{classification}" if classification else "verified"
 
 
 # 26.09.2026 (Iman/EMILIA-Protocol, SCITT-Mailingliste): Python-Parity zu
@@ -1682,6 +1696,9 @@ def main() -> int:
     parser.add_argument("trusted_key", nargs="?")
     parser.add_argument("approval_key", nargs="?")
     parser.add_argument("--policy", help="Pfad zu einer Proof-Policy-Datei (spec/policies/*.json) -- optionales Gate nach erfolgreicher Verifikation.")
+    # 26.11.2026 (A-043): identisches Muster wie trusted_key/approval_key -- lokale PEM-Datei, kein
+    # Netzwerkabruf. purpose=example_evidence in trust_anchor_registry.keys[].
+    parser.add_argument("--example-evidence-key", help="Pfad zum oeffentlichen Schluessel des example_evidence-Trust-Ankers (purpose=example_evidence in trust_anchor_registry.keys[]) -- klassifiziert ein damit signiertes Bundle als example_evidence_only statt untrusted_signer, aendert nie das Haupt-Pinning gegen trusted_key.")
     args = parser.parse_args()
     try:
         with open(args.bundle, encoding="utf-8") as handle:
@@ -1690,6 +1707,10 @@ def main() -> int:
         if args.trusted_key:
             with open(args.trusted_key, encoding="utf-8") as handle:
                 trusted = handle.read()
+        example_evidence_key = None
+        if args.example_evidence_key:
+            with open(args.example_evidence_key, encoding="utf-8") as handle:
+                example_evidence_key = handle.read()
         # CLI-Dispatch nach schema_version (Spiegel zu main() in verify.ts): Hilfsartefakte laufen
         # ueber ihren eigenen Verifier, Evidence-Bundles fallen in den verify()-Pfad unten.
         schema = bundle.get("schema_version")
@@ -1744,7 +1765,7 @@ def main() -> int:
         if args.approval_key:
             with open(args.approval_key, encoding="utf-8") as handle:
                 approval = handle.read()
-        ok, reason = verify(bundle, trusted, approval)
+        ok, reason = verify(bundle, trusted, approval, example_evidence_key)
         # 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trusted_key prueft der
         # Legacy-/Nicht-V2-Pfad die Signatur NUR gegen den im Bundle selbst eingebetteten
         # public_key -- wer sein eigenes Keypair erzeugt, ein Event aendert und das Bundle
@@ -1761,6 +1782,8 @@ def main() -> int:
         print("VERIFIED" if ok else f"REJECTED: {reason}")
         if not ok:
             return 2
+        if reason == "verified:example_evidence_only":
+            print("WARNUNG: EXAMPLE EVIDENCE ONLY -- signiert mit dem dedizierten example_evidence-Trust-Anchor-Key (oeffentliche Demo-/Beispiel-Bundles), NICHT mit dem echten evidence_package-Key. Keine echte Evidence.", file=sys.stderr)
         checks = {"signature": "ok", "hash_chain": "ok"}
         timestamp = bundle.get("rfc3161_timestamp")
         if isinstance(timestamp, dict):
