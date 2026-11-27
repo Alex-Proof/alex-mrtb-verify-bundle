@@ -1188,7 +1188,10 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
             return False, "missing_approval_attestation"
         if not approval_key:
             return False, "missing_approval_trust_anchor"
-        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+        normalized_approval_key = normalize_pem(approval_key)
+        attestation_public_key = attestation.get("public_key")
+        normalized_attestation_public_key = normalize_pem(attestation_public_key) if isinstance(attestation_public_key, str) else attestation_public_key
+        if normalized_attestation_public_key != normalized_approval_key or attestation.get("signer_key_id") != key_id(normalized_approval_key):
             return False, "untrusted_approval_signer"
         approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
         if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):
@@ -1626,7 +1629,10 @@ def verify_verifier_binding_manifest_v1(manifest: dict[str, Any], bundle: dict[s
     if attestation:
         if not approval_key:
             return False, "missing_approval_trust_anchor"
-        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+        normalized_approval_key = normalize_pem(approval_key)
+        attestation_public_key = attestation.get("public_key")
+        normalized_attestation_public_key = normalize_pem(attestation_public_key) if isinstance(attestation_public_key, str) else attestation_public_key
+        if normalized_attestation_public_key != normalized_approval_key or attestation.get("signer_key_id") != key_id(normalized_approval_key):
             return False, "untrusted_approval_signer"
         approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
         if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):

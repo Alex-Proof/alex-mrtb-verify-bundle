@@ -828,7 +828,8 @@ export function verifyVerifierBindingManifestV1(
   if (bundle.approval_attestation) {
     if (!trustedApprovalPublicKey) return { ok: false, reason: "missing_approval_trust_anchor" };
     const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = bundle.approval_attestation;
-    if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) {
+    const normalizedTrustedApprovalPublicKey = normalizePem(trustedApprovalPublicKey);
+    if (normalizePem(approvalPublicKey) !== normalizedTrustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(normalizedTrustedApprovalPublicKey)) {
       return { ok: false, reason: "untrusted_approval_signer" };
     }
     if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) {
@@ -2621,13 +2622,15 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
     if (!approval_attestation) return { ok: false, reason: "missing_approval_attestation" };
     if (!trustedApprovalPublicKey) return { ok: false, reason: "missing_approval_trust_anchor" };
     const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = approval_attestation;
+    const normalizedTrustedApprovalPublicKey = normalizePem(trustedApprovalPublicKey);
+    const normalizedApprovalPublicKey = normalizePem(approvalPublicKey);
     // 06.09.2026 (identischer Fix wie evidenceBundle.server.ts, live gefunden beim Bau der
     // Proof-Policy-Gate-Tests, Punkt 3): observer_receipt wird in der Produktions-Pipeline IMMER
     // erst NACH attachApprovalAttestation() angehaengt -- bundle_sha256 wurde ohne dieses Feld
     // berechnet. Ohne den Ausschluss haette jedes COMPLETED, freigegebene UND vom Observer
     // bezeugte Bundle hier faelschlich "approval_bundle_hash_mismatch" geliefert.
     const { approval_attestation: _ignored, observer_receipt: _observerReceiptIgnored, epistemic_gate: _epistemicGateIgnored, ...bundleWithoutApproval } = bundle;
-    if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) return { ok: false, reason: "untrusted_approval_signer" };
+    if (normalizedApprovalPublicKey !== normalizedTrustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(normalizedTrustedApprovalPublicKey)) return { ok: false, reason: "untrusted_approval_signer" };
     if (approvalPayload.bundle_sha256 !== sha256(JSON.stringify(bundleWithoutApproval))) return { ok: false, reason: "approval_bundle_hash_mismatch" };
     if (!verify(null, Buffer.from(JSON.stringify(approvalPayload)), approvalPublicKey, Buffer.from(approvalSignature, "base64"))) return { ok: false, reason: "invalid_approval_signature" };
   }
@@ -3193,7 +3196,8 @@ async function checkPreCutoffGrandfatheredAllowlist(contentHash: string): Promis
   const trustedApprovalPublicKey = approvalConsensus.agreed_public_key_pem;
   if (!trustedApprovalPublicKey) return { ok: false, reason: "grandfathered_allowlist_missing_approval_trust_anchor" };
   const { signature: approvalSignature, public_key: approvalPublicKey, signer_key_id, ...approvalPayload } = attestation;
-  if (approvalPublicKey !== trustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(trustedApprovalPublicKey)) {
+  const normalizedTrustedApprovalPublicKey = normalizePem(trustedApprovalPublicKey);
+  if (normalizePem(approvalPublicKey) !== normalizedTrustedApprovalPublicKey || signer_key_id !== evidenceSignerKeyId(normalizedTrustedApprovalPublicKey)) {
     return { ok: false, reason: "grandfathered_allowlist_untrusted_approval_signer" };
   }
   if (approvalPayload.allowlist_sha256 !== sha256(JSON.stringify(allowlistWithoutApproval))) {

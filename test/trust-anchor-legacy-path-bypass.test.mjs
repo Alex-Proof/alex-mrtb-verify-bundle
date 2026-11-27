@@ -134,3 +134,37 @@ test("CRLF and LF variants of the same trustedPublicKey yield the same result (D
   assert.notEqual(lfResult.reason, "untrusted_signer");
   assert.deepEqual(crlfResult, lfResult);
 });
+
+// 27.11.2026 (Prompt 2, third variant of the same bug class): the approval_attestation.public_key
+// comparison against trustedApprovalPublicKey (approval_attestation_required branch) was not part
+// of the above CRLF fix yet. A CRLF-stored --approval-key file did not match the
+// approval_attestation.public_key embedded in the bundle (always "\n", since it comes from JSON).
+function selfSignedApprovalRequiredBundle(privateKey, publicKey, approverPrivateKey, approverPublicKey) {
+  const bundleWithoutApproval = selfSignedLegacyBundle(privateKey, publicKey, { approval_attestation_required: true });
+  const approvalPayload = {
+    schema_version: "approval-attestation@1.0",
+    actor_id: "tester",
+    approved_at: new Date().toISOString(),
+    bundle_sha256: createHash("sha256").update(JSON.stringify(bundleWithoutApproval)).digest("hex"),
+  };
+  const approvalSignature = sign(null, Buffer.from(JSON.stringify(approvalPayload)), approverPrivateKey).toString("base64");
+  const approval_attestation = {
+    ...approvalPayload,
+    signer_key_id: evidenceSignerKeyId(approverPublicKey),
+    public_key: approverPublicKey,
+    signature: approvalSignature,
+  };
+  return { ...bundleWithoutApproval, approval_attestation };
+}
+
+test("CRLF and LF variants of the same trustedApprovalPublicKey yield the same result (approval_attestation_required path)", () => {
+  const signer = freshEd25519();
+  const approver = freshEd25519();
+  const bundle = selfSignedApprovalRequiredBundle(signer.privateKey, signer.publicKey, approver.privateKey, approver.publicKey);
+  const crlfApprovalKey = approver.publicKey.replace(/\n/g, "\r\n");
+
+  const lfResult = verifyBundleObject(bundle, signer.publicKey, approver.publicKey);
+  const crlfResult = verifyBundleObject(bundle, signer.publicKey, crlfApprovalKey);
+  assert.equal(lfResult.ok, true);
+  assert.deepEqual(crlfResult, lfResult);
+});
