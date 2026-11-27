@@ -1,7 +1,16 @@
 # Independence Test Kit
 
-**Zuletzt bearbeitet:** 2026-11-19 (verify.py/spec/ als lokale Snapshot-Kopien, siehe Nachtrag unten)
+**Zuletzt bearbeitet:** 2026-11-28 (Warnung gegen Fehlanwendung auf neue Bundles ergaenzt, siehe
+Nachtrag unten)
 **Von:** Alex-Proof
+
+> **`independence/verify.py` ist auf Quellstand `b3d1148` (2026-09-06) eingefroren und prueft nur
+> `demo-pr-38.json`.** Fuehre ihn NIE gegen ein anderes/neueres Evidence-Bundle aus -- er kennt
+> z.B. keine `evidence-package@2.3`-Bundles und kein `epistemic_gate`-Feld (beide erst nach dem
+> Freeze eingefuehrt) und wuerde ein echtes, gueltiges neueres Bundle faelschlich als
+> `unsupported_schema_or_capability` oder `invalid_signature` ablehnen. Fuer JEDES andere Bundle
+> -- auch ein weiteres `demo-pr-*.json` -- den lebenden `../verify.py`/`../dist/verify.js`
+> verwenden, wie im Haupt-README unter "Pruef es selbst" dokumentiert.
 
 Dieses Verzeichnis enthaelt den eingefrorenen Werkzeugsatz und drei reale Pruefprotokolle
 desselben Evidence Package ohne Vertrauen in eine laufende ALEX-Instanz. Das veroeffentlichbare
@@ -59,3 +68,23 @@ weiterentwickelte Hauptkopie im Repo-Root. `SHA256SUMS` und die Befehle oben zei
 Kopien. Das Kit bleibt dadurch dauerhaft reproduzierbar, auch wenn `../verify.py` kuenftig weitere
 Sicherheitsfixes bekommt -- ohne dass jemand erst einen alten Commit auschecken muss, um die neun
 Dateien wieder gruen zu bekommen.
+
+## Nachtrag 2026-11-28: Namensverwechslung -- eingefroren heisst nicht "der unabhaengige Verifier"
+
+Externer Pruefer (Staford Titus, AMEP) hat `independence/verify.py` gegen zwei NEUE, von Andre
+direkt bereitgestellte Bundles ausgefuehrt (`demo-pr-41`, ein Canary-Bundle) statt gegen das hier
+eingefrorene `demo-pr-38.json`. Beide neuen Bundles nutzen `evidence-package@2.3` mit
+`epistemic_gate` -- Felder, die erst NACH dem Freeze vom 2026-09-06 eingefuehrt wurden
+(`epistemic_gate` 2026-09-28, Schema 2.3 spaeter). `independence/verify.py` kennt beides nicht:
+`DEVTASK_V2_SCHEMA_VERSIONS` endet bei `evidence-package@2.2`, und die signierte Nutzlast schliesst
+`epistemic_gate` nicht aus -- ein TATSAECHLICH gueltiges neueres Bundle faellt deshalb hier
+faelschlich durch, waehrend derselbe Lauf gegen den lebenden `../verify.py`/`../dist/verify.js`
+korrekt VERIFIED liefert.
+
+Das ist kein Fehler in der eingefrorenen Kopie selbst (sie tut genau das, wofuer sie gebaut wurde:
+`demo-pr-38.json` gegen Quellstand `b3d1148` reproduzierbar pruefen) -- sondern eine
+Namensverwechslung, die der Ordnername `independence/` nahelegt: er klingt nach "der unabhaengige
+Verifier allgemein", ist aber "der eingefrorene Reproduktions-Snapshot fuer genau EIN historisches
+Bundle". Fix: die Warnung oben am Dateianfang + derselbe Hinweis als Kommentar direkt im
+Skriptkopf von `verify.py` (dort, wo jemand, der die Datei einfach oeffnet statt dieses README zu
+lesen, es zuerst sieht).

@@ -60,6 +60,9 @@ npm test
 
 Mehr Hintergrund und die drei reproduzierbaren Unabhaengigkeitstests (offline, auf einem fremden
 Linux-System, bei vollstaendig gestoppter ALEX-Runtime): Ordner [`independence/`](independence/).
+**Achtung:** `independence/verify.py` ist auf Quellstand `b3d1148` eingefroren und prueft NUR
+`independence/demo-pr-38.json` -- fuer jedes andere Bundle immer `verify.py`/`dist/verify.js` aus
+diesem Wurzelverzeichnis verwenden (siehe Warnung in [`independence/README.md`](independence/README.md)).
 
 ## Änderungsverlauf
 
