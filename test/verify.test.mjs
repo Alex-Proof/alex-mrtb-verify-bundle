@@ -157,6 +157,20 @@ test("Agent Passport History: lehnt einen fremden/nicht vertrauenswuerdigen Schl
   assert.deepEqual(result, { ok: false, reason: "untrusted_signer" });
 });
 
+// 27.11.2026 (A-043, externer Pruefer -- echter Fund, Parity zum alex-core-Monorepo-Fix): der
+// isDevTaskV2Schema-Pfad hatte VORHER GAR KEINEN Klassifikations-Ausweg -- ein mit dem
+// example_evidence-Key signiertes V2-Bundle lief bei Mismatch mit einer (echten, abweichenden)
+// trustedPublicKey hart auf untrusted_signer, unabhaengig davon, ob exampleEvidencePublicKey
+// korrekt uebergeben wurde. devTaskV21Bundle() unten liefert outcome:"inconclusive" -- der
+// entscheidende Beweis ist NICHT ok:true, sondern dass reason NIE mehr untrusted_signer ist.
+test("example_evidence: DevTask-V2-Schema-Pfad klassifiziert jetzt ebenfalls example_evidence_only statt untrusted_signer (vorher kein Klassifikations-Ausweg fuer diesen Pfad)", () => {
+  const bundle = devTaskV21Bundle();
+  const { _trustedPublicKey: exampleEvidenceKey, ...clean } = bundle;
+  const { publicKey: productionKey } = generateKeyPairSync("ed25519");
+  const result = verifyBundleObject(clean, productionKey.export({ type: "spki", format: "pem" }), undefined, exampleEvidenceKey);
+  assert.deepEqual(result, { ok: false, reason: "non_verified_outcome:inconclusive", verified_claim_ladder: "L0" });
+});
+
 test("rejects a self-signed forgery that declares an unrecognized evidence-package schema version", () => {
   // 01.09.2026: Regressionstest fuer einen echten Fund -- vor dem Fix lief jeder schema_version-
   // Wert ausser exakt "evidence-package@2.0" komplett am Trust-Anchor-Pinning vorbei, die

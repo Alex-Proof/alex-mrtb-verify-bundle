@@ -2527,12 +2527,20 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   // uebergeben -> identisches Verhalten wie vorher). Anders als crossCheckTrustAnchor() im
   // internen Alex-Monorepo-Spiegel: hier IMMER eine lokale PEM-Datei, nie ein Netzwerkaufruf --
   // dieser eigenstaendige Verifier macht nie einen frischen Netzwerkaufruf.
-  let classification: "example_evidence_only" | undefined;
   // rfc3161_timestamp/observer_receipt/epistemic_gate werden IMMER erst nach dem Signieren
   // angehaengt -- waren nie Teil der signierten Nutzlast, muessen hier ebenso ausgeschlossen
   // werden (siehe verifyRfc3161Binding()/crossCheckObserverReceipt()/verifyEpistemicGateBinding()
   // fuer die getrennten Zusatzpruefungen).
   const { signature, public_key, rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...payload } = bundle;
+
+  // 27.11.2026 (A-043, externer Pruefer -- echter Fund, Parity zu alex-core): classification muss
+  // VOR jeder schema-spezifischen Pinning-Pruefung feststehen, nicht nur im Legacy-Zweig unten --
+  // isDevTaskV2Schema-Bundles hatten vorher GAR KEINEN Klassifikations-Ausweg, ein mit dem
+  // example_evidence-Key signiertes V2-Bundle lief bei Mismatch mit trustedPublicKey hart auf
+  // untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
+  // irrtuemlich selbst als trustedPublicKey uebergibt (matcht hier unconditional).
+  const classification: "example_evidence_only" | undefined =
+    exampleEvidencePublicKey && public_key === exampleEvidencePublicKey ? "example_evidence_only" : undefined;
 
   // Fail-closed: siehe Kommentar bei DEVTASK_V2_SCHEMA_VERSIONS oben.
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
@@ -2553,10 +2561,13 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   if (isDevTaskV2Schema(bundle.schema_version)) {
     if (!trustedPublicKey) return { ok: false, reason: "missing_trust_anchor" };
     if (public_key !== trustedPublicKey || bundle.signer_key_id !== evidenceSignerKeyId(trustedPublicKey)) {
-      return { ok: false, reason: "untrusted_signer" };
+      // 27.11.2026 (A-043, siehe Kommentar bei der classification-Herleitung oben): vorher hart
+      // untrusted_signer, OHNE Ruecksicht auf eine bereits erkannte example_evidence_only-
+      // Klassifikation -- der DevTask-V2-Pfad hatte dadurch GAR KEINEN Klassifikations-Ausweg.
+      if (!classification) return { ok: false, reason: "untrusted_signer" };
     }
     if (!bundle.controller_evidence) return { ok: false, reason: "missing_controller_evidence" };
-  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey) {
+  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey && !classification) {
     // 06.11.2026 (real finding via the public Evidence-Forgery Challenge, verdict:"valid" for a
     // self-signed bundle WITHOUT schema_version): the branch above only checks trustedPublicKey
     // when schema_version is in DEVTASK_V2_SCHEMA_VERSIONS. If schema_version is missing or an
@@ -2566,15 +2577,7 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
     // presented as "valid" against a foreign public key. Only active when trustedPublicKey is
     // actually passed: a call WITHOUT a second argument is unchanged (genuine legacy bundles
     // predating this hardening, with no pinning claim to begin with).
-    if (exampleEvidencePublicKey && public_key === exampleEvidencePublicKey) {
-      classification = "example_evidence_only";
-    } else {
-      return { ok: false, reason: "untrusted_signer" };
-    }
-  }
-  // 26.11.2026 (A-043): deckt den Selbstkonsistenz-Pfad ab (gar kein trustedPublicKey uebergeben).
-  if (!classification && exampleEvidencePublicKey && public_key === exampleEvidencePublicKey) {
-    classification = "example_evidence_only";
+    return { ok: false, reason: "untrusted_signer" };
   }
 
   const signedPayload = bundle.schema_version === "evidence-package@2.2" || bundle.schema_version === "evidence-package@2.3"
