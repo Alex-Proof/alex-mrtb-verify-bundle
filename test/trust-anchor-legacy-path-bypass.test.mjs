@@ -3,6 +3,10 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 import { verifyBundleObject } from "../dist/verify.js";
 
+function evidenceSignerKeyId(publicKey) {
+  return `ed25519:${createHash("sha256").update(publicKey).digest("hex")}`;
+}
+
 // 06.11.2026: real finding via the public Evidence-Forgery Challenge (challenge.alexproof.de,
 // isolated VM, imports this exact verify.ts unmodified). verifyBundleObject() checked
 // trustedPublicKey only inside the isDevTaskV2Schema() branch -- a self-signed bundle without
@@ -81,4 +85,52 @@ test("a pinned bundle with a correctly matching trustedPublicKey remains valid",
 
   const result = verifyBundleObject(bundle, signer.publicKey);
   assert.deepEqual(result, { ok: true });
+});
+
+// 27.11.2026 (Robustheits-Fund, Parity zu alex-core's verify.ts/verify.test.mjs): PEM comparisons
+// were byte-sensitive -- a PEM file saved with CRLF instead of LF no longer matched the
+// public_key embedded in the bundle (always "\n", since it comes from a JSON string). Both
+// variants (LF, CRLF) of the same PEM must yield the same result.
+test("CRLF and LF variants of the same trustedPublicKey yield the same result (legacy path)", () => {
+  const signer = freshEd25519();
+  const bundle = selfSignedLegacyBundle(signer.privateKey, signer.publicKey);
+  const crlfKey = signer.publicKey.replace(/\n/g, "\r\n");
+
+  const lfResult = verifyBundleObject(bundle, signer.publicKey);
+  const crlfResult = verifyBundleObject(bundle, crlfKey);
+  assert.deepEqual(lfResult, { ok: true });
+  assert.deepEqual(crlfResult, lfResult);
+});
+
+test("CRLF and LF variants of the same example_evidence key yield the same result", () => {
+  const exampleEvidenceSigner = freshEd25519();
+  const realEvidenceAnchor = freshEd25519();
+  const bundle = selfSignedLegacyBundle(exampleEvidenceSigner.privateKey, exampleEvidenceSigner.publicKey);
+  const crlfExampleEvidenceKey = exampleEvidenceSigner.publicKey.replace(/\n/g, "\r\n");
+
+  const lfResult = verifyBundleObject(bundle, realEvidenceAnchor.publicKey, undefined, exampleEvidenceSigner.publicKey);
+  const crlfResult = verifyBundleObject(bundle, realEvidenceAnchor.publicKey, undefined, crlfExampleEvidenceKey);
+  assert.deepEqual(lfResult, { ok: true, classification: "example_evidence_only" });
+  assert.deepEqual(crlfResult, lfResult);
+});
+
+function selfSignedV2Bundle(privateKey, publicKey) {
+  const payload = {
+    schema_version: "evidence-package@2.0", bundle_id: "test-v2-bundle", capability: "devtask.execution@1.0",
+    run_id: "task-1:1", claim_ladder: "L0", executed_at: new Date().toISOString(), trace_events: [], trace_hash_chain: [],
+    outcome: "inconclusive", signer_key_id: evidenceSignerKeyId(publicKey),
+  };
+  const signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString("base64");
+  return { ...payload, public_key: publicKey, signature };
+}
+
+test("CRLF and LF variants of the same trustedPublicKey yield the same result (DevTask-V2 path, incl. signer_key_id hash)", () => {
+  const signer = freshEd25519();
+  const bundle = selfSignedV2Bundle(signer.privateKey, signer.publicKey);
+  const crlfKey = signer.publicKey.replace(/\n/g, "\r\n");
+
+  const lfResult = verifyBundleObject(bundle, signer.publicKey);
+  const crlfResult = verifyBundleObject(bundle, crlfKey);
+  assert.notEqual(lfResult.reason, "untrusted_signer");
+  assert.deepEqual(crlfResult, lfResult);
 });

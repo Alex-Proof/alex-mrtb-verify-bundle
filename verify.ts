@@ -2381,6 +2381,16 @@ function evidenceSignerKeyId(publicKey: string): string {
   return `ed25519:${createHash("sha256").update(publicKey).digest("hex")}`;
 }
 
+// 27.11.2026 (Robustheits-Fund, Parity zu normalizePem() in alex-core's verify.ts): PEM comparisons
+// below were byte-sensitive -- a PEM file saved with CRLF instead of LF no longer matched the
+// public_key embedded in the bundle (always "\n", since it comes from a JSON string). Normalizes
+// ONLY CRLF->LF before every PEM comparison/hash. Deliberately NO trim(): signer_key_id is a
+// sha256 over the full PEM including its trailing newline -- trimming would change the hash and
+// break evidenceSignerKeyId() against existing signer_key_id values.
+function normalizePem(pem: string): string {
+  return pem.replace(/\r\n/g, "\n");
+}
+
 function riskRank(riskClass: string | null | undefined): number {
   const match = /^R([0-4])$/.exec(riskClass ?? "");
   return match ? Number(match[1]) : 4;
@@ -2532,6 +2542,12 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   // werden (siehe verifyRfc3161Binding()/crossCheckObserverReceipt()/verifyEpistemicGateBinding()
   // fuer die getrennten Zusatzpruefungen).
   const { signature, public_key, rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...payload } = bundle;
+  // 27.11.2026 (Robustheits-Fund, siehe normalizePem() oben): alle PEM-Vergleiche unten laufen
+  // gegen die normalisierte Form, der eingebettete public_key bleibt fuer die Signaturpruefung
+  // (verify() unten) unveraendert -- der ist immer bundle-intern aus JSON, also immer "\n".
+  const normalizedPublicKey = normalizePem(public_key);
+  const normalizedTrustedPublicKey = trustedPublicKey !== undefined ? normalizePem(trustedPublicKey) : undefined;
+  const normalizedExampleEvidencePublicKey = exampleEvidencePublicKey !== undefined ? normalizePem(exampleEvidencePublicKey) : undefined;
 
   // 27.11.2026 (A-043, externer Pruefer -- echter Fund, Parity zu alex-core): classification muss
   // VOR jeder schema-spezifischen Pinning-Pruefung feststehen, nicht nur im Legacy-Zweig unten --
@@ -2540,7 +2556,7 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   // untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
   // irrtuemlich selbst als trustedPublicKey uebergibt (matcht hier unconditional).
   const classification: "example_evidence_only" | undefined =
-    exampleEvidencePublicKey && public_key === exampleEvidencePublicKey ? "example_evidence_only" : undefined;
+    normalizedExampleEvidencePublicKey && normalizedPublicKey === normalizedExampleEvidencePublicKey ? "example_evidence_only" : undefined;
 
   // Fail-closed: siehe Kommentar bei DEVTASK_V2_SCHEMA_VERSIONS oben.
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
@@ -2560,14 +2576,14 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   }
   if (isDevTaskV2Schema(bundle.schema_version)) {
     if (!trustedPublicKey) return { ok: false, reason: "missing_trust_anchor" };
-    if (public_key !== trustedPublicKey || bundle.signer_key_id !== evidenceSignerKeyId(trustedPublicKey)) {
+    if (normalizedPublicKey !== normalizedTrustedPublicKey || bundle.signer_key_id !== evidenceSignerKeyId(normalizedTrustedPublicKey!)) {
       // 27.11.2026 (A-043, siehe Kommentar bei der classification-Herleitung oben): vorher hart
       // untrusted_signer, OHNE Ruecksicht auf eine bereits erkannte example_evidence_only-
       // Klassifikation -- der DevTask-V2-Pfad hatte dadurch GAR KEINEN Klassifikations-Ausweg.
       if (!classification) return { ok: false, reason: "untrusted_signer" };
     }
     if (!bundle.controller_evidence) return { ok: false, reason: "missing_controller_evidence" };
-  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey && !classification) {
+  } else if (trustedPublicKey !== undefined && normalizedPublicKey !== normalizedTrustedPublicKey && !classification) {
     // 06.11.2026 (real finding via the public Evidence-Forgery Challenge, verdict:"valid" for a
     // self-signed bundle WITHOUT schema_version): the branch above only checks trustedPublicKey
     // when schema_version is in DEVTASK_V2_SCHEMA_VERSIONS. If schema_version is missing or an
