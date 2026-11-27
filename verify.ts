@@ -3745,6 +3745,10 @@ async function main() {
   }
   if (result.classification === "example_evidence_only") {
     console.warn("   ⚠ EXAMPLE EVIDENCE ONLY: signiert mit dem dedizierten example_evidence-Trust-Anchor-Key (oeffentliche Demo-/Beispiel-Bundles), NICHT mit dem echten evidence_package-Key. Keine echte Evidence.");
+    // 27.11.2026 (Mirror-Sync-Nachtrag zu A-043/Exit-7): exit 7 ist in diesem oeffentlichen CLI
+    // bereits fuer SELF-CONSISTENT ONLY belegt (siehe unten) -- hier exit 8, damit stderr nicht
+    // das einzige Unterscheidungsmerkmal fuer Aufrufer bleibt, die nur den Exit-Code pruefen.
+    process.exitCode = 8;
   }
 
   // 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trustedPublicKey prueft der

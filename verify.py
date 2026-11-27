@@ -1782,7 +1782,13 @@ def main() -> int:
         print("VERIFIED" if ok else f"REJECTED: {reason}")
         if not ok:
             return 2
+        # 27.11.2026 (Mirror-Sync-Nachtrag zu A-043/Exit-7): exit 7 ist in diesem oeffentlichen CLI
+        # bereits fuer den SELF-CONSISTENT-ONLY-Pfad (kein trusted_key) belegt (siehe oben) -- hier
+        # exit 8, damit stderr nicht das einzige Unterscheidungsmerkmal fuer example_evidence_only
+        # bleibt (Parity-Absicht wie im privaten _verifier.py, dort frei exit 7).
+        exit_code = 0
         if reason == "verified:example_evidence_only":
+            exit_code = 8
             print("WARNUNG: EXAMPLE EVIDENCE ONLY -- signiert mit dem dedizierten example_evidence-Trust-Anchor-Key (oeffentliche Demo-/Beispiel-Bundles), NICHT mit dem echten evidence_package-Key. Keine echte Evidence.", file=sys.stderr)
         checks = {"signature": "ok", "hash_chain": "ok"}
         timestamp = bundle.get("rfc3161_timestamp")
@@ -1816,7 +1822,7 @@ def main() -> int:
                 print(f"PROOF POLICY '{evaluation['policy_id']}' BLOCKED -- gated action '{evaluation['gates_action']}' denied. "
                       f"Missing: {', '.join(evaluation['blocked_by'])}")
                 return 6
-        return 0
+        return exit_code
     except (OSError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
