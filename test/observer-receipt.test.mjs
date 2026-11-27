@@ -1,8 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
-import { crossCheckObserverReceipt } from "../dist/verify.js";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { crossCheckObserverReceipt, verifyObserverReceiptSignatureOffline, verifyBundleObject } from "../dist/verify.js";
+
+const verifierDir = fileURLToPath(new URL("..", import.meta.url));
 
 const LEAF_PREFIX = Buffer.from([0x00]);
 const NODE_PREFIX = Buffer.from([0x01]);
@@ -120,4 +127,117 @@ test("crossCheckObserverReceipt: unerreichbarer Observer liefert einen Fehlergru
   const result = await crossCheckObserverReceipt(withReceipt);
   assert.equal(result.ok, false);
   assert.match(result.reason, /^observer_unreachable:/);
+});
+
+// Offline-verifiable observer signature (Nov 2026): mirrors the describe-block of the same name
+// in alex-core's internal test suite -- standalone verifier, no shared import, so the signature
+// is produced here directly instead of via an imported canonical().
+function canonicalPayload(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalPayload).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalPayload(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function signedObserverBundle({ leafIndex = 3, receivedAt = "2026-09-05T00:00:00.000Z" } = {}) {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const bundle = { bundle_id: "b1", run_id: "r1", executed_at: "t1", outcome: "verified" };
+  const bundleSha256 = createHash("sha256").update(JSON.stringify(bundle)).digest("hex");
+  const payload = {
+    schema_version: "observer-signature@1.0", entry_type: "bundle_attestation@1.0",
+    bundle_id: bundle.bundle_id, run_id: bundle.run_id, leaf_index: leafIndex, received_at: receivedAt,
+    bundle_sha256: bundleSha256,
+  };
+  const signature = sign(null, Buffer.from(canonicalPayload(payload), "utf8"), privateKey).toString("base64");
+  return {
+    publicKeyPem,
+    bundleWithReceipt: {
+      ...bundle,
+      observer_receipt: { schema_version: "observer-receipt@1.0", observer_url: "http://example.invalid", leaf_index: leafIndex, received_at: receivedAt, signature },
+    },
+  };
+}
+
+test("verifyObserverReceiptSignatureOffline: akzeptiert eine echte, gegen den gepinnten Public Key gueltige Signatur", () => {
+  const { publicKeyPem, bundleWithReceipt } = signedObserverBundle();
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(bundleWithReceipt, publicKeyPem), { ok: true });
+});
+
+test("verifyObserverReceiptSignatureOffline: lehnt eine Signatur ab, wenn die Bundle-Nutzlast nach dem Signieren manipuliert wurde", () => {
+  const { publicKeyPem, bundleWithReceipt } = signedObserverBundle();
+  const tampered = { ...bundleWithReceipt, outcome: "inconclusive" };
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(tampered, publicKeyPem), { ok: false, reason: "observer_signature_invalid" });
+});
+
+test("verifyObserverReceiptSignatureOffline: lehnt eine Signatur ab, wenn leaf_index nach dem Signieren manipuliert wurde", () => {
+  const { publicKeyPem, bundleWithReceipt } = signedObserverBundle();
+  const tampered = { ...bundleWithReceipt, observer_receipt: { ...bundleWithReceipt.observer_receipt, leaf_index: 999 } };
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(tampered, publicKeyPem), { ok: false, reason: "observer_signature_invalid" });
+});
+
+test("verifyObserverReceiptSignatureOffline: bleibt Altverhalten (kein Fail), wenn observer_receipt gar keine Signatur traegt", () => {
+  const { bundleWithReceipt } = signedObserverBundle();
+  const { signature: _omit, ...receiptWithoutSignature } = bundleWithReceipt.observer_receipt;
+  const legacyBundle = { ...bundleWithReceipt, observer_receipt: receiptWithoutSignature };
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(legacyBundle, "irrelevant"), { ok: false, reason: "signature_missing" });
+});
+
+test("verifyObserverReceiptSignatureOffline: meldet explizit, wenn kein Observer-Public-Key gepinnt ist, statt stillschweigend durchzulassen", () => {
+  const { bundleWithReceipt } = signedObserverBundle();
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(bundleWithReceipt), { ok: false, reason: "no_observer_signing_public_key_pinned" });
+});
+
+test("verifyBundleObject: lehnt ein ansonsten gueltiges Bundle mit manipulierter Observer-Signatur ab", () => {
+  const { publicKey: mainPublicKey, privateKey: mainPrivateKey } = generateKeyPairSync("ed25519");
+  const mainPublicKeyPem = mainPublicKey.export({ type: "spki", format: "pem" }).toString();
+  const unsigned = {
+    bundle_id: "b1", capability: "core_self_test", run_id: "r1", executed_at: "2026-11-27T00:00:00.000Z",
+    claim_ladder: "L1", outcome: "verified", trace_events: [], trace_hash_chain: [],
+  };
+  const signature = sign(null, Buffer.from(JSON.stringify(unsigned)), mainPrivateKey).toString("base64");
+  const signedBundle = { ...unsigned, public_key: mainPublicKeyPem, signature };
+
+  const { publicKeyPem: observerPublicKeyPem } = signedObserverBundle();
+  const { bundleWithReceipt: attackerSigned } = signedObserverBundle();
+  const bundleWithForgedObserverReceipt = { ...signedBundle, observer_receipt: attackerSigned.observer_receipt };
+
+  const result = verifyBundleObject(bundleWithForgedObserverReceipt, undefined, undefined, undefined, observerPublicKeyPem);
+  assert.deepEqual(result, { ok: false, reason: "observer_signature_invalid" });
+});
+
+// TS/Python-Parity (verify-bundle-duplicate-logic-drift-Prinzip, siehe alex-core): beide
+// Verifier muessen fuer dieselbe Signatur zum selben Ergebnis kommen, nicht nur jeder fuer sich.
+function pythonVerifyObserverSignature(bundle, observerKeyPem) {
+  const dir = mkdtempSync(join(tmpdir(), "observer-py-"));
+  const bundlePath = join(dir, "bundle.json");
+  const keyPath = join(dir, "observer.pem");
+  writeFileSync(bundlePath, JSON.stringify(bundle));
+  writeFileSync(keyPath, observerKeyPem ?? "");
+  const script = [
+    "import importlib.util,json,sys",
+    "s=importlib.util.spec_from_file_location('verify_py',sys.argv[1])",
+    "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)",
+    "b=json.load(open(sys.argv[2],encoding='utf-8'))",
+    "key=open(sys.argv[3],encoding='utf-8').read() if sys.argv[3] else None",
+    "ok,reason=m.verify_observer_receipt_signature_offline(b, key or None)",
+    "print(json.dumps({'ok':ok,'reason':reason}))",
+  ].join(";");
+  const result = spawnSync(process.env.PYTHON ?? "python", ["-c", script, `${verifierDir}/verify.py`, bundlePath, observerKeyPem ? keyPath : ""], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("verifyObserverReceiptSignatureOffline: TypeScript und Python akzeptieren dieselbe echte Signatur identisch", () => {
+  const { publicKeyPem, bundleWithReceipt } = signedObserverBundle();
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(bundleWithReceipt, publicKeyPem), { ok: true });
+  assert.deepEqual(pythonVerifyObserverSignature(bundleWithReceipt, publicKeyPem), { ok: true, reason: null });
+});
+
+test("verifyObserverReceiptSignatureOffline: TypeScript und Python lehnen eine manipulierte Signatur identisch ab", () => {
+  const { publicKeyPem, bundleWithReceipt } = signedObserverBundle();
+  const tampered = { ...bundleWithReceipt, outcome: "inconclusive" };
+  assert.deepEqual(verifyObserverReceiptSignatureOffline(tampered, publicKeyPem), { ok: false, reason: "observer_signature_invalid" });
+  assert.deepEqual(pythonVerifyObserverSignature(tampered, publicKeyPem), { ok: false, reason: "observer_signature_invalid" });
 });

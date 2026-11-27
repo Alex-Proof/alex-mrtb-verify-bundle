@@ -312,6 +312,36 @@ def verify_rfc3161_binding(bundle: dict[str, Any]) -> tuple[bool, str | None]:
     return True, None
 
 
+# Offline-verifiable observer signature (Nov 2026): mirrors verify_observer_receipt_signature_
+# offline() in the alex-core internal TypeScript verifier / server adapter -- same semantics, no
+# shared import. bundle_sha256 is recomputed with compact() (insertion order, no key sorting) from
+# the bundle, never taken from the receipt -- same unsorted JSON.stringify() form both TS
+# counterparts use. The Ed25519 signature itself is over the CANONICAL (sorted) form of the
+# signature payload (canonical_evidence_bytes()) -- signer and verifier must be byte-identical here.
+def verify_observer_receipt_signature_offline(bundle: dict[str, Any], observer_key: str | None = None) -> tuple[bool, str | None]:
+    receipt = bundle.get("observer_receipt")
+    if not isinstance(receipt, dict):
+        return False, "not_applicable_no_observer_receipt"
+    signature = receipt.get("signature")
+    if not signature:
+        return False, "signature_missing"
+    if not observer_key:
+        return False, "no_observer_signing_public_key_pinned"
+    without_receipt = {
+        key: value for key, value in bundle.items()
+        if key not in ("observer_receipt", "epistemic_gate", "receipt_chain_entry")
+    }
+    payload = {
+        "schema_version": "observer-signature@1.0", "entry_type": "bundle_attestation@1.0",
+        "bundle_id": bundle.get("bundle_id"), "run_id": bundle.get("run_id"),
+        "leaf_index": receipt.get("leaf_index"), "received_at": receipt.get("received_at"),
+        "bundle_sha256": sha256_bytes(compact(without_receipt)),
+    }
+    if not openssl_verify(observer_key, canonical_evidence_bytes(payload), str(signature)):
+        return False, "observer_signature_invalid"
+    return True, None
+
+
 def verify_rfc3161_tsa_chain(timestamp: dict[str, Any]) -> tuple[bool, str | None]:
     digest = timestamp.get("timestamped_sha256")
     if not isinstance(digest, str) or not HEX64.fullmatch(digest):
@@ -1005,7 +1035,7 @@ def build_customer_summary_de(input_: dict[str, Any]) -> str:
 
 
 def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key: str | None = None,
-           example_evidence_key: str | None = None) -> tuple[bool, str]:
+           example_evidence_key: str | None = None, observer_key: str | None = None) -> tuple[bool, str]:
     # 26.11.2026 (A-043, Parity zu verifyBundleObject() in verify.ts): example_evidence_key ist rein
     # additiv und NIE live aus der Registry geholt (dieser Verifier macht nie einen frischen
     # Netzwerkaufruf) -- muss als lokale PEM-Datei uebergeben werden. Klassifiziert ein mit dem
@@ -1185,6 +1215,15 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
         without_approval = {key: value for key, value in bundle.items() if key not in ("approval_attestation", "observer_receipt", "epistemic_gate")}
         if attestation.get("bundle_sha256") != sha256_bytes(compact(without_approval)):
             return False, "approval_scope_mismatch"
+    # Offline-verifiable observer signature (Nov 2026, Parity zu verifyBundleObject() in
+    # verify.ts): additiv zur bestehenden fail-closed Live-Pruefung (die dieser Offline-Verifier
+    # gar nicht ausfuehrt) -- fehlende Signatur bleibt Altverhalten, eine VORHANDENE aber falsche/
+    # manipulierte Signatur lehnt verify() hier explizit ab.
+    observer_receipt = bundle.get("observer_receipt")
+    if isinstance(observer_receipt, dict) and observer_receipt.get("signature") is not None:
+        observer_ok, observer_reason = verify_observer_receipt_signature_offline(bundle, observer_key)
+        if not observer_ok and observer_reason == "observer_signature_invalid":
+            return False, "observer_signature_invalid"
     # 06.11.2026 (Issue #9): fuer is_v2 ist dies bereits weiter oben erzwungen (frueher Return bei
     # Nicht-"verified"); fuer den Legacy-/memory.*-Pfad ist dies der einzige Ort, der outcome
     # unbedingt gegen "verified" prueft -- Parity zu `if (bundle.outcome !== "verified")` am Ende
@@ -1768,7 +1807,10 @@ def main() -> int:
         if args.approval_key:
             with open(args.approval_key, encoding="utf-8") as handle:
                 approval = handle.read()
-        ok, reason = verify(bundle, trusted, approval, example_evidence_key)
+        # Same lightweight env-var pinning as getObserverSigningPublicKey() in alex-core's server
+        # adapter and main() in verify.ts -- alex-core does not generate/rotate this key itself.
+        observer_key = os.environ.get("OBSERVER_SIGNING_PUBLIC_KEY_PEM")
+        ok, reason = verify(bundle, trusted, approval, example_evidence_key, observer_key)
         # 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trusted_key prueft der
         # Legacy-/Nicht-V2-Pfad die Signatur NUR gegen den im Bundle selbst eingebetteten
         # public_key -- wer sein eigenes Keypair erzeugt, ein Event aendert und das Bundle

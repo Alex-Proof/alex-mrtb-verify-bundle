@@ -182,12 +182,64 @@ export interface ObserverReceipt {
   observer_url: string;
   leaf_index: number;
   received_at: string;
+  /** Offline-verifiable observer signature (Nov 2026): Ed25519 signature (base64) over the
+   *  canonicalized receipt fields, in addition to the existing live Merkle check
+   *  (crossCheckObserverReceipt()), not a replacement for it. Optional: any bundle from before the
+   *  observer started signing receipts lacks this field; a missing field leaves prior behavior
+   *  unchanged (no fail in verifyObserverReceiptSignatureOffline() below, just "not checkable"). */
+  signature?: string;
 }
 
 /** Mirrors adapters/observerRelay.server.ts (no shared import between server and this standalone verifier). */
 export interface ExecutionLogReceipt extends ObserverReceipt {
   entry_hash: string;
   sequence: number;
+}
+
+const OBSERVER_SIGNATURE_SCHEMA = "observer-signature@1.0" as const;
+
+interface ObserverSignaturePayload {
+  schema_version: typeof OBSERVER_SIGNATURE_SCHEMA;
+  entry_type: string;
+  bundle_id: string;
+  run_id: string;
+  leaf_index: number;
+  received_at: string;
+  bundle_sha256?: string;
+  observation_digest_sha256?: string;
+  entry_hash?: string;
+}
+
+/** Standalone mirror of verifyObserverReceiptSignatureOffline() in the alex-core server adapter
+ *  (adapters/observerRelay.server.ts) -- same semantics, no shared import, same convention as the
+ *  rest of this file. Offline (no network, no observer reachability needed): checks only that the
+ *  embedded signature matches the pinned observer public key -- additive to the existing
+ *  fail-closed live check crossCheckObserverReceipt() below, not a replacement for it.
+ *  bundle_sha256 is RECOMPUTED from the bundle itself, never taken from the receipt -- otherwise a
+ *  tampered bundle payload could pass under a genuine signature issued for a DIFFERENT hash. */
+export function verifyObserverReceiptSignatureOffline<T extends {
+  bundle_id: string; run_id: string; observer_receipt?: ObserverReceipt; epistemic_gate?: unknown; receipt_chain_entry?: unknown; independent_verifier_attestation?: unknown;
+}>(bundle: T, observerSigningPublicKeyPem?: string): { ok: boolean; reason?: string } {
+  const receipt = bundle.observer_receipt;
+  if (!receipt) return { ok: false, reason: "not_applicable_no_observer_receipt" };
+  if (!receipt.signature) return { ok: false, reason: "signature_missing" };
+  if (!observerSigningPublicKeyPem) return { ok: false, reason: "no_observer_signing_public_key_pinned" };
+
+  const { observer_receipt, epistemic_gate, receipt_chain_entry: _chainEntry, independent_verifier_attestation: _independentVerifierIgnored, ...withoutObserverReceipt } = bundle;
+  const bundleSha256 = sha256(JSON.stringify(withoutObserverReceipt));
+  const payload: ObserverSignaturePayload = {
+    schema_version: OBSERVER_SIGNATURE_SCHEMA, entry_type: "bundle_attestation@1.0",
+    bundle_id: bundle.bundle_id, run_id: bundle.run_id,
+    leaf_index: receipt.leaf_index, received_at: receipt.received_at,
+    bundle_sha256: bundleSha256,
+  };
+  let valid: boolean;
+  try {
+    valid = verify(null, Buffer.from(canonical(payload), "utf8"), observerSigningPublicKeyPem, Buffer.from(receipt.signature, "base64"));
+  } catch {
+    return { ok: false, reason: "observer_signature_invalid" };
+  }
+  return valid ? { ok: true } : { ok: false, reason: "observer_signature_invalid" };
 }
 
 export interface ApprovalAttestationV1 {
@@ -2515,7 +2567,7 @@ export function deriveDevTaskV2Outcome(events: string[], controller: DevTaskCont
 const CLAIM_LADDER_RANK: Record<EvidenceBundle["claim_ladder"], number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 function claimLadderRank(ladder: EvidenceBundle["claim_ladder"]): number { return CLAIM_LADDER_RANK[ladder]; }
 
-export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string, exampleEvidencePublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"]; classification?: "example_evidence_only" } {
+export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string, exampleEvidencePublicKey?: string, trustedObserverPublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"]; classification?: "example_evidence_only" } {
   const bundle = withoutReceiptChainEntry(bundleIn);
   // 26.11.2026 (A-043, Parity zu _verifier.py): example_evidence_only ist bisher nur Typ+Registry-
   // Eintrag, kein tatsaechlicher Verdikt-Pfad -- ein mit dem dedizierten example_evidence-Key
@@ -2690,6 +2742,17 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
           reason: `trace_outcome_mismatch:declared=${bundle.outcome}:derived=${derivedOutcome}`,
         };
       }
+    }
+  }
+
+  // Offline-verifiable observer signature (Nov 2026): additive to the existing fail-closed live
+  // check (crossCheckObserverReceipt(), needs network) -- not a replacement for it. A missing
+  // signature (any bundle from before the observer started signing receipts) deliberately stays
+  // prior behavior, not a fail; a PRESENT but wrong/tampered signature is rejected explicitly.
+  if (bundle.observer_receipt?.signature !== undefined) {
+    const observerSignatureCheck = verifyObserverReceiptSignatureOffline(bundle, trustedObserverPublicKey);
+    if (!observerSignatureCheck.ok && observerSignatureCheck.reason === "observer_signature_invalid") {
+      return { ok: false, reason: "observer_signature_invalid" };
     }
   }
 
@@ -3732,7 +3795,11 @@ async function main() {
     return;
   }
 
-  const result = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey, exampleEvidencePublicKey);
+  // Same lightweight env-var pinning as getObserverSigningPublicKey() in alex-core's server
+  // adapter (adapters/observerRelay.server.ts) -- alex-core does not generate/rotate this key
+  // itself, it is only pinned here.
+  const trustedObserverPublicKey = process.env.OBSERVER_SIGNING_PUBLIC_KEY_PEM;
+  const result = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey, exampleEvidencePublicKey, trustedObserverPublicKey);
   const reading = buildCustomerReadingViewDe(bundle, trustedPublicKey, trustedApprovalPublicKey);
   if (reading.integrity === "checked") {
     for (const section of reading.sections) {
