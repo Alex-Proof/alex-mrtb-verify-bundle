@@ -2515,13 +2515,32 @@ export function deriveDevTaskV2Outcome(events: string[], controller: DevTaskCont
 const CLAIM_LADDER_RANK: Record<EvidenceBundle["claim_ladder"], number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 function claimLadderRank(ladder: EvidenceBundle["claim_ladder"]): number { return CLAIM_LADDER_RANK[ladder]; }
 
-export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"] } {
+export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string, exampleEvidencePublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"]; classification?: "example_evidence_only" } {
   const bundle = withoutReceiptChainEntry(bundleIn);
+  // 26.11.2026 (A-043, Parity zu _verifier.py): example_evidence_only ist bisher nur Typ+Registry-
+  // Eintrag, kein tatsaechlicher Verdikt-Pfad -- ein mit dem dedizierten example_evidence-Key
+  // signiertes Bundle lief bisher entweder als plain "verified" (wenn kein trustedPublicKey
+  // uebergeben wurde) oder als untrusted_signer (wenn der echte Anchor-Key uebergeben wurde) durch,
+  // beides ohne maschinenlesbares Merkmal dass es sich NIE um echte Evidence handeln kann.
+  // exampleEvidencePublicKey ist rein additiv: ersetzt untrusted_signer durch eine eigene
+  // classification, aendert sonst nichts am bestehenden Pfad (kein exampleEvidencePublicKey
+  // uebergeben -> identisches Verhalten wie vorher). Anders als crossCheckTrustAnchor() im
+  // internen Alex-Monorepo-Spiegel: hier IMMER eine lokale PEM-Datei, nie ein Netzwerkaufruf --
+  // dieser eigenstaendige Verifier macht nie einen frischen Netzwerkaufruf.
   // rfc3161_timestamp/observer_receipt/epistemic_gate werden IMMER erst nach dem Signieren
   // angehaengt -- waren nie Teil der signierten Nutzlast, muessen hier ebenso ausgeschlossen
   // werden (siehe verifyRfc3161Binding()/crossCheckObserverReceipt()/verifyEpistemicGateBinding()
   // fuer die getrennten Zusatzpruefungen).
   const { signature, public_key, rfc3161_timestamp, approval_attestation, observer_receipt, epistemic_gate, ...payload } = bundle;
+
+  // 27.11.2026 (A-043, externer Pruefer -- echter Fund, Parity zu alex-core): classification muss
+  // VOR jeder schema-spezifischen Pinning-Pruefung feststehen, nicht nur im Legacy-Zweig unten --
+  // isDevTaskV2Schema-Bundles hatten vorher GAR KEINEN Klassifikations-Ausweg, ein mit dem
+  // example_evidence-Key signiertes V2-Bundle lief bei Mismatch mit trustedPublicKey hart auf
+  // untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
+  // irrtuemlich selbst als trustedPublicKey uebergibt (matcht hier unconditional).
+  const classification: "example_evidence_only" | undefined =
+    exampleEvidencePublicKey && public_key === exampleEvidencePublicKey ? "example_evidence_only" : undefined;
 
   // Fail-closed: siehe Kommentar bei DEVTASK_V2_SCHEMA_VERSIONS oben.
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
@@ -2542,10 +2561,13 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   if (isDevTaskV2Schema(bundle.schema_version)) {
     if (!trustedPublicKey) return { ok: false, reason: "missing_trust_anchor" };
     if (public_key !== trustedPublicKey || bundle.signer_key_id !== evidenceSignerKeyId(trustedPublicKey)) {
-      return { ok: false, reason: "untrusted_signer" };
+      // 27.11.2026 (A-043, siehe Kommentar bei der classification-Herleitung oben): vorher hart
+      // untrusted_signer, OHNE Ruecksicht auf eine bereits erkannte example_evidence_only-
+      // Klassifikation -- der DevTask-V2-Pfad hatte dadurch GAR KEINEN Klassifikations-Ausweg.
+      if (!classification) return { ok: false, reason: "untrusted_signer" };
     }
     if (!bundle.controller_evidence) return { ok: false, reason: "missing_controller_evidence" };
-  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey) {
+  } else if (trustedPublicKey !== undefined && public_key !== trustedPublicKey && !classification) {
     // 06.11.2026 (real finding via the public Evidence-Forgery Challenge, verdict:"valid" for a
     // self-signed bundle WITHOUT schema_version): the branch above only checks trustedPublicKey
     // when schema_version is in DEVTASK_V2_SCHEMA_VERSIONS. If schema_version is missing or an
@@ -2677,7 +2699,11 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
       : { ok: false, reason: `non_verified_outcome:${bundle.outcome}` };
   }
 
-  return verifiedClaimLadder !== undefined ? { ok: true, verified_claim_ladder: verifiedClaimLadder } : { ok: true };
+  return {
+    ok: true,
+    ...(verifiedClaimLadder !== undefined ? { verified_claim_ladder: verifiedClaimLadder } : {}),
+    ...(classification ? { classification } : {}),
+  };
 }
 
 // Normative Feldliste: spec/devtask.execution@1.0.schema.json.
@@ -3564,13 +3590,27 @@ async function runManifestSubcommand(): Promise<void> {
 }
 
 async function main() {
-  if (process.argv[2] === "manifest") {
+  // 26.11.2026 (A-043): --example-evidence-key ist ein benanntes Flag, kein positionales Argument
+  // (das Positionsschema argv[3]/argv[4]/... ist bereits belegt) -- aus argv herausfiltern, bevor
+  // irgendeine positionale Auswertung laeuft, damit die bestehende Indizierung unveraendert bleibt.
+  // Immer eine lokale PEM-Datei, nie ein Netzwerkaufruf (identisches Muster zu _verifier.py).
+  const exampleEvidenceKeyFlagIndex = process.argv.indexOf("--example-evidence-key");
+  let exampleEvidencePublicKey: string | undefined;
+  if (exampleEvidenceKeyFlagIndex !== -1) {
+    const keyPath = process.argv[exampleEvidenceKeyFlagIndex + 1];
+    if (keyPath) exampleEvidencePublicKey = readFileSync(keyPath, "utf-8");
+  }
+  const argv = exampleEvidenceKeyFlagIndex === -1
+    ? process.argv
+    : process.argv.filter((_, i) => i !== exampleEvidenceKeyFlagIndex && i !== exampleEvidenceKeyFlagIndex + 1);
+
+  if (argv[2] === "manifest") {
     return runManifestSubcommand();
   }
 
-  const bundlePath = process.argv[2];
+  const bundlePath = argv[2];
   if (!bundlePath) {
-    console.error("Usage: verify <bundle.json> [controller-key.pem] [approval-key.pem] [validation.json evidence-key.pem review.json reviewer-key.pem]");
+    console.error("Usage: verify <bundle.json> [controller-key.pem] [approval-key.pem] [validation.json evidence-key.pem review.json reviewer-key.pem] [--example-evidence-key <pem>]");
     console.error("  Ohne controller-key.pem: der Trust-Anchor wird automatisch gegen mehrere unabhaengige Kanaele geprueft.");
     console.error("Usage: alex-verify manifest <manifest.json> <bundle.json> [controller-key.pem] [approval-key.pem]");
     process.exitCode = 1;
@@ -3580,7 +3620,7 @@ async function main() {
   const input = JSON.parse(readFileSync(bundlePath, "utf-8")) as EvidenceBundle | VerdictArtifactV1 | AgentPassportHistoryExportV1 | AgentPassportCardArtifactV1 | ChallengeResponseArtifactV1 | PhpExposureEvidenceArtifactV1;
 
   if (input.schema_version === "agent-passport-card@1.0") {
-    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    const trustedKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
     if (!trustedKey) {
       console.error("Agent passport card verification failed: trusted public key required (argv[3])");
       process.exitCode = 2;
@@ -3597,7 +3637,7 @@ async function main() {
   }
 
   if (input.schema_version === "agent-passport-history@1.0") {
-    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    const trustedKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
     if (!trustedKey) {
       console.error("Agent passport history verification failed: trusted public key required (argv[3])");
       process.exitCode = 2;
@@ -3614,7 +3654,7 @@ async function main() {
   }
 
   if (input.schema_version === "challenge-response@1.0") {
-    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    const trustedKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
     if (!trustedKey) {
       console.error("Challenge response verification failed: trusted public key required (argv[3])");
       process.exitCode = 2;
@@ -3631,7 +3671,7 @@ async function main() {
   }
 
   if (input.schema_version === "php-exposure-evidence@1.0") {
-    const trustedKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
+    const trustedKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
     if (!trustedKey) {
       console.error("PHP exposure evidence verification failed: trusted public key required (argv[3])");
       process.exitCode = 2;
@@ -3649,8 +3689,8 @@ async function main() {
 
   const verdictArtifact = input.schema_version === "verdict-artifact@1.0" ? input : null;
   const bundle = verdictArtifact ? verdictArtifact.source_bundle : input as EvidenceBundle;
-  let trustedPublicKey = process.argv[3] ? readFileSync(process.argv[3], "utf-8") : undefined;
-  let trustedApprovalPublicKey = process.argv[4] ? readFileSync(process.argv[4], "utf-8") : undefined;
+  let trustedPublicKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
+  let trustedApprovalPublicKey = argv[4] ? readFileSync(argv[4], "utf-8") : undefined;
 
   if (!trustedPublicKey && isDevTaskV2Schema(bundle.schema_version)) {
     const consensus = await crossCheckTrustAnchor("evidence_package");
@@ -3692,7 +3732,7 @@ async function main() {
     return;
   }
 
-  const result = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey);
+  const result = verifyBundleObject(bundle, trustedPublicKey, trustedApprovalPublicKey, exampleEvidencePublicKey);
   const reading = buildCustomerReadingViewDe(bundle, trustedPublicKey, trustedApprovalPublicKey);
   if (reading.integrity === "checked") {
     for (const section of reading.sections) {
@@ -3705,6 +3745,13 @@ async function main() {
     console.error(`❌ Bundle verification failed: ${result.reason}`);
     process.exitCode = 2;
     return;
+  }
+  if (result.classification === "example_evidence_only") {
+    console.warn("   ⚠ EXAMPLE EVIDENCE ONLY: signiert mit dem dedizierten example_evidence-Trust-Anchor-Key (oeffentliche Demo-/Beispiel-Bundles), NICHT mit dem echten evidence_package-Key. Keine echte Evidence.");
+    // 27.11.2026 (Mirror-Sync-Nachtrag zu A-043/Exit-7): exit 7 ist in diesem oeffentlichen CLI
+    // bereits fuer SELF-CONSISTENT ONLY belegt (siehe unten) -- hier exit 8, damit stderr nicht
+    // das einzige Unterscheidungsmerkmal fuer Aufrufer bleibt, die nur den Exit-Code pruefen.
+    process.exitCode = 8;
   }
 
   // 07.11.2026 (externe Kritik, AWM-Sketch-Review): ohne trustedPublicKey prueft der
@@ -3749,16 +3796,16 @@ async function main() {
   const checks: Record<string, string> = { signature: "ok", hash_chain: "ok" };
   let reviewerPathReachedL3 = false;
 
-  if (process.argv[5]) {
-    const validationBytes = readFileSync(process.argv[5]);
+  if (argv[5]) {
+    const validationBytes = readFileSync(argv[5]);
     const validation = JSON.parse(validationBytes.toString("utf8")) as ValidationAttestationV1;
-    const evidenceKey = process.argv[6] ? readFileSync(process.argv[6], "utf8") : "";
+    const evidenceKey = argv[6] ? readFileSync(argv[6], "utf8") : "";
     const expectedCommit = bundle.controller_evidence?.repository_state?.result_commit ?? "";
     const validationResult = verifyValidationAttestation(validation, evidenceKey, expectedCommit);
     if (!validationResult.ok) { console.error(`Validation verification failed: ${validationResult.reason}`); process.exitCode = 3; return; }
-    if (process.argv[7]) {
-      const bundleBytes = readFileSync(bundlePath); const review = JSON.parse(readFileSync(process.argv[7], "utf8")) as ReviewerAttestationV1;
-      const reviewerKey = process.argv[8] ? readFileSync(process.argv[8], "utf8") : "";
+    if (argv[7]) {
+      const bundleBytes = readFileSync(bundlePath); const review = JSON.parse(readFileSync(argv[7], "utf8")) as ReviewerAttestationV1;
+      const reviewerKey = argv[8] ? readFileSync(argv[8], "utf8") : "";
       const reviewResult = verifyReviewerAttestation(review, reviewerKey, bundleBytes, validationBytes);
       if (!reviewResult.ok) { console.error(`Reviewer verification failed: ${reviewResult.reason}`); process.exitCode = 4; return; }
       console.log("   independent validation + reviewer signature verified (Claim-Ladder=L3)");
