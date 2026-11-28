@@ -1004,6 +1004,24 @@ def build_customer_summary_de(input_: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# 28.11.2026 (A-043-Nachtrag, externer Kritiker -- echter Fund, Parity zu alex-core): bislang hing
+# die example_evidence_only-Klassifikation vollstaendig vom --example-evidence-key-Flag ab -- ohne
+# das Flag sah ein mit diesem Key signiertes Bundle wie normale VERIFIED-Evidence aus (identisches
+# stdout, exit 0, leeres stderr). Dieser Schluessel ist aber eine feste Konstante OHNE Rotation
+# (identischer Wert wie EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM im Alex-Monorepo,
+# evidence/mrtb/evidenceBundle.server.ts, docs/ASSUMPTIONS.md A-043/A-052) -- braucht deshalb kein
+# Flag mehr.
+KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM = (
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEATqY8KmBhobaGG59HQXIYWa29WKcaedX+5sjgxsgXu4M=\n-----END PUBLIC KEY-----\n"
+)
+
+
+def refuses_example_evidence_key_as_trust_anchor(trusted_key: str | None) -> bool:
+    if trusted_key is None:
+        return False
+    return trusted_key == KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM
+
+
 def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key: str | None = None,
            example_evidence_key: str | None = None) -> tuple[bool, str]:
     # 26.11.2026 (A-043, Parity zu verifyBundleObject() in verify.ts): example_evidence_key ist rein
@@ -1059,7 +1077,12 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
     # Ausweg, ein mit dem example_evidence-Key signiertes V2-Bundle lief bei Mismatch hart auf
     # untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
     # irrtuemlich selbst als trusted_key uebergibt (matcht hier unconditional).
-    if example_evidence_key is not None and embedded == example_evidence_key:
+    # 28.11.2026: der hartcodierte Konstanten-Key gilt IMMER zusaetzlich zum optionalen
+    # --example-evidence-key-Flag -- kein Flag mehr noetig, siehe
+    # KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM-Kommentar oben.
+    if embedded == KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM or (
+        example_evidence_key is not None and embedded == example_evidence_key
+    ):
         classification = "example_evidence_only"
     if is_v2:
         if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
@@ -1663,6 +1686,9 @@ def _run_manifest_subcommand(argv: list[str]) -> int:
         bundle = json.load(handle)
     with open(args.trusted_key, encoding="utf-8") as handle:
         trusted_key = handle.read()
+    if refuses_example_evidence_key_as_trust_anchor(trusted_key):
+        print("refusing: the pinned trust anchor is the published example_evidence key (purpose=example_evidence in the trust anchor registry) -- it never signs real evidence and cannot serve as a trust anchor.", file=sys.stderr)
+        return 9
     approval_key = None
     if args.approval_key:
         with open(args.approval_key, encoding="utf-8") as handle:
@@ -1710,6 +1736,9 @@ def main() -> int:
         if args.trusted_key:
             with open(args.trusted_key, encoding="utf-8") as handle:
                 trusted = handle.read()
+        if refuses_example_evidence_key_as_trust_anchor(trusted):
+            print("refusing: the pinned trust anchor is the published example_evidence key (purpose=example_evidence in the trust anchor registry) -- it never signs real evidence and cannot serve as a trust anchor.", file=sys.stderr)
+            return 9
         example_evidence_key = None
         if args.example_evidence_key:
             with open(args.example_evidence_key, encoding="utf-8") as handle:
