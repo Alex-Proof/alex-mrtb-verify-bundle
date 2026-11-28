@@ -2515,6 +2515,27 @@ export function deriveDevTaskV2Outcome(events: string[], controller: DevTaskCont
 const CLAIM_LADDER_RANK: Record<EvidenceBundle["claim_ladder"], number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 function claimLadderRank(ladder: EvidenceBundle["claim_ladder"]): number { return CLAIM_LADDER_RANK[ladder]; }
 
+/** 28.11.2026 (A-043-Nachtrag, externer Kritiker -- echter Fund, Parity zu alex-core): bislang hing
+ *  die example_evidence_only-Klassifikation vollstaendig vom --example-evidence-key-Flag ab -- ohne
+ *  das Flag sah ein mit diesem Key signiertes Bundle wie normale VERIFIED-Evidence aus (identisches
+ *  stdout, exit 0, leeres stderr). Dieser Schluessel ist aber eine feste Konstante OHNE Rotation
+ *  (identischer Wert wie EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM im Alex-Monorepo,
+ *  evidence/mrtb/evidenceBundle.server.ts, docs/ASSUMPTIONS.md A-043/A-052) -- braucht deshalb kein
+ *  Flag mehr. */
+const KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM =
+  "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEATqY8KmBhobaGG59HQXIYWa29WKcaedX+5sjgxsgXu4M=\n-----END PUBLIC KEY-----\n";
+
+/** Der example_evidence-Key darf NIE als Haupt-Trust-Anchor (trustedPublicKey) gepinnt werden --
+ *  wer das tut, hat sich offensichtlich geirrt (der Key signiert per Definition niemals echte
+ *  Evidence). Laeuft VOR jeder Bundle-Pruefung, unabhaengig vom Bundle-Inhalt. */
+function refuseIfExampleEvidenceKeyPinnedAsTrustAnchor(trustedPublicKey: string | undefined): boolean {
+  if (trustedPublicKey === undefined) return false;
+  if (trustedPublicKey !== KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM) return false;
+  console.error("refusing: the pinned trust anchor is the published example_evidence key (purpose=example_evidence in the trust anchor registry) -- it never signs real evidence and cannot serve as a trust anchor.");
+  process.exitCode = 9;
+  return true;
+}
+
 export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: string, trustedApprovalPublicKey?: string, exampleEvidencePublicKey?: string): { ok: boolean; reason?: string; verified_claim_ladder?: EvidenceBundle["claim_ladder"]; classification?: "example_evidence_only" } {
   const bundle = withoutReceiptChainEntry(bundleIn);
   // 26.11.2026 (A-043, Parity zu _verifier.py): example_evidence_only ist bisher nur Typ+Registry-
@@ -2539,8 +2560,13 @@ export function verifyBundleObject(bundleIn: EvidenceBundle, trustedPublicKey?: 
   // example_evidence-Key signiertes V2-Bundle lief bei Mismatch mit trustedPublicKey hart auf
   // untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
   // irrtuemlich selbst als trustedPublicKey uebergibt (matcht hier unconditional).
+  // 28.11.2026: der hartcodierte Konstanten-Key gilt IMMER zusaetzlich zum optionalen
+  // --example-evidence-key-Flag -- kein Flag mehr noetig, siehe
+  // KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM-Kommentar oben.
   const classification: "example_evidence_only" | undefined =
-    exampleEvidencePublicKey && public_key === exampleEvidencePublicKey ? "example_evidence_only" : undefined;
+    public_key === KNOWN_EXAMPLE_EVIDENCE_PUBLIC_KEY_PEM
+    || (exampleEvidencePublicKey !== undefined && public_key === exampleEvidencePublicKey)
+      ? "example_evidence_only" : undefined;
 
   // Fail-closed: siehe Kommentar bei DEVTASK_V2_SCHEMA_VERSIONS oben.
   if (bundle.schema_version?.startsWith("evidence-package@") && !isDevTaskV2Schema(bundle.schema_version)) {
@@ -3541,6 +3567,7 @@ async function runManifestSubcommand(): Promise<void> {
 
   let trustedPublicKey = process.argv[5] ? readFileSync(process.argv[5], "utf-8") : undefined;
   let trustedApprovalPublicKey = process.argv[6] ? readFileSync(process.argv[6], "utf-8") : undefined;
+  if (refuseIfExampleEvidenceKeyPinnedAsTrustAnchor(trustedPublicKey)) return;
   if (!trustedPublicKey) {
     const consensus = await crossCheckTrustAnchor("evidence_package");
     printConsensus("evidence_package", consensus);
@@ -3691,6 +3718,7 @@ async function main() {
   const bundle = verdictArtifact ? verdictArtifact.source_bundle : input as EvidenceBundle;
   let trustedPublicKey = argv[3] ? readFileSync(argv[3], "utf-8") : undefined;
   let trustedApprovalPublicKey = argv[4] ? readFileSync(argv[4], "utf-8") : undefined;
+  if (refuseIfExampleEvidenceKeyPinnedAsTrustAnchor(trustedPublicKey)) return;
 
   if (!trustedPublicKey && isDevTaskV2Schema(bundle.schema_version)) {
     const consensus = await crossCheckTrustAnchor("evidence_package");
