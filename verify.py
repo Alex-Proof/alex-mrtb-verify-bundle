@@ -94,6 +94,16 @@ def key_id(pem: str) -> str:
     return "ed25519:" + sha256_text(pem)
 
 
+# 27.11.2026 (Robustheits-Fund, Parity zu normalize_pem() in alex-core's _verifier.py): PEM
+# comparisons below were byte-sensitive -- a PEM file saved with CRLF instead of LF no longer
+# matched the public_key embedded in the bundle (always "\n", since it comes from a JSON string).
+# Normalizes ONLY CRLF->LF before every PEM comparison/hash. Deliberately no strip(): key_id() is
+# a sha256 over the full PEM including its trailing newline -- stripping would change the hash
+# and break it against existing signer_key_id values.
+def normalize_pem(pem: str) -> str:
+    return pem.replace("\r\n", "\n")
+
+
 # 06.11.2026 (externe Kritik): verify.ts prueft bundle.approval_attestation_required nur per JS-
 # Truthy ("if (bundle.approval_attestation_required)"), nicht per strikter Gleichheit zu true. Ein
 # gefaelschtes Bundle mit approval_attestation_required: 1 (statt true) wurde von TS weiterhin als
@@ -1053,19 +1063,24 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
     if shutil.which("openssl") is None:
         return False, "openssl_unavailable"
     embedded = bundle.get("public_key")
+    # 27.11.2026 (Robustheits-Fund, siehe normalize_pem() oben): alle PEM-Vergleiche unten laufen
+    # gegen die normalisierte Form, embedded selbst bleibt fuer die Signaturpruefung unveraendert.
+    normalized_embedded = normalize_pem(embedded) if isinstance(embedded, str) else embedded
+    normalized_trusted_key = normalize_pem(trusted_key) if trusted_key is not None else None
+    normalized_example_evidence_key = normalize_pem(example_evidence_key) if example_evidence_key is not None else None
     # 27.11.2026 (A-043, externer Pruefer -- echter Fund, Parity zu verifyBundleObject() in
     # verify.ts): classification muss VOR jeder schema-spezifischen Pinning-Pruefung feststehen,
     # nicht nur im Legacy-elif unten -- der is_v2-Zweig hatte vorher GAR KEINEN Klassifikations-
     # Ausweg, ein mit dem example_evidence-Key signiertes V2-Bundle lief bei Mismatch hart auf
     # untrusted_signer. Deckt zusaetzlich ab, dass der Aufrufer den example_evidence-Anchor
     # irrtuemlich selbst als trusted_key uebergibt (matcht hier unconditional).
-    if example_evidence_key is not None and embedded == example_evidence_key:
+    if normalized_example_evidence_key is not None and normalized_embedded == normalized_example_evidence_key:
         classification = "example_evidence_only"
     if is_v2:
-        if embedded != trusted_key or bundle.get("signer_key_id") != key_id(trusted_key):
+        if normalized_embedded != normalized_trusted_key or bundle.get("signer_key_id") != key_id(normalized_trusted_key):
             if classification is None:
                 return False, "untrusted_signer"
-    elif trusted_key is not None and embedded != trusted_key and classification is None:
+    elif trusted_key is not None and normalized_embedded != normalized_trusted_key and classification is None:
         # 06.11.2026 (Issue #9, Parity zu verifyBundleObject(), identisches Muster wie der
         # Issue-#2/#3-Fix): Legacy-Signaturpfad -- nur gepinnt, wenn trusted_key ueberhaupt
         # uebergeben wurde. Ein Aufruf OHNE trusted_key (None) bleibt unveraendert.
@@ -1173,7 +1188,10 @@ def verify(bundle: dict[str, Any], trusted_key: str | None = None, approval_key:
             return False, "missing_approval_attestation"
         if not approval_key:
             return False, "missing_approval_trust_anchor"
-        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+        normalized_approval_key = normalize_pem(approval_key)
+        attestation_public_key = attestation.get("public_key")
+        normalized_attestation_public_key = normalize_pem(attestation_public_key) if isinstance(attestation_public_key, str) else attestation_public_key
+        if normalized_attestation_public_key != normalized_approval_key or attestation.get("signer_key_id") != key_id(normalized_approval_key):
             return False, "untrusted_approval_signer"
         approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
         if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):
@@ -1611,7 +1629,10 @@ def verify_verifier_binding_manifest_v1(manifest: dict[str, Any], bundle: dict[s
     if attestation:
         if not approval_key:
             return False, "missing_approval_trust_anchor"
-        if attestation.get("public_key") != approval_key or attestation.get("signer_key_id") != key_id(approval_key):
+        normalized_approval_key = normalize_pem(approval_key)
+        attestation_public_key = attestation.get("public_key")
+        normalized_attestation_public_key = normalize_pem(attestation_public_key) if isinstance(attestation_public_key, str) else attestation_public_key
+        if normalized_attestation_public_key != normalized_approval_key or attestation.get("signer_key_id") != key_id(normalized_approval_key):
             return False, "untrusted_approval_signer"
         approval_payload = {key: value for key, value in attestation.items() if key not in ("signature", "public_key", "signer_key_id")}
         if not openssl_verify(approval_key, compact(approval_payload), str(attestation.get("signature", ""))):
