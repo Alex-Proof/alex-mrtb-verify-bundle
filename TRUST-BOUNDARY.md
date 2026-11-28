@@ -122,17 +122,49 @@ because the signing key never enters the CI environment.
 is itself a file in this repository, and `main` already requires `required_signatures: true` and
 `enforce_admins: true` (no bypass, including for the maintainer). Replacing or adding a key means
 editing this file through a signed commit on a reviewed PR — the same path, and the same
-guarantees, as any other change to this repository. A separate PR (#17, open) adds a 24-hour
+guarantees, as any other change to this repository. PR #17 (merged 2026-11-16) adds a 24-hour
 public-cooldown requirement specifically for this file (and for `verify.ts`/`verify.py`/
-`release.yml`/`trust-anchor.json`) before it can merge; **honestly stated: that check is not yet a
-required status context in branch protection**, so until #17 merges and is added as a required
-check, a key rotation technically only needs a signed commit, not 24h of public visibility first.
-There is no separate witnessed-registry/append-only-log construction for this key, unlike the
-Evidence/Approval key revocations above — it was judged unnecessary here because the control
-already in place (signed-commit-only, no admin bypass, on a single-maintainer repo) is the actual
-bottleneck, and a second logging layer around it would not change who can authorize a change,
-only how visibly they did it.
+`release.yml`/`trust-anchor.json`) before it can merge, and it is now wired in as a required
+status context in branch protection — a rotation needs both a signed commit and 24h of public
+visibility first. There is no separate witnessed-registry/append-only-log construction for this
+key, unlike the Evidence/Approval key revocations above — it was judged unnecessary here because
+the control already in place (signed-commit-only, no admin bypass, cooldown, on a single-
+maintainer repo) is the actual bottleneck, and a second logging layer around it would not change
+who can authorize a change, only how visibly they did it.
 
 **What this does not cover:** if the maintainer's own SSH key or GitHub account is compromised,
 this entire boundary collapses — same single-point-of-trust limit as the rest of this repo's
 model (see the top of this document). Nothing here claims otherwise.
+
+## allowed_signers was its own trust root (fixed 2026-11-17)
+
+**Status:** current, 2026-11-17. Written in response to a direct follow-up from the same external
+reviewer (Bluesky): `allowed_signers` had the same root as the tags it authorizes — the one key in
+that file both defines trust and signs the releases that trust approves. A stolen key could add a
+second line to the file and sign the commit that added it, and `required_signatures` would pass,
+because it only checks "is this commit signed by *a* key in `allowed_signers`," not "is this the
+*right* `allowed_signers`." Nothing pinned the file's content from outside the repo's own commit
+history.
+
+**What changed:** `release.yml` now has a step, run before `git verify-tag`, that hashes
+`.github/allowed_signers` and compares it against a GitHub Actions secret
+(`ALLOWED_SIGNERS_SHA256`). A mismatch fails the release hard, before the signature check ever
+runs. The secret is not a second signing key — it is a pinned expected value, checked by string
+equality, nothing cryptographic beyond the hash itself.
+
+**Why a secret and not a second SSH key:** a second key sounds like real separation of duty, but on
+a single-maintainer repo both keys end up held by the same person, usually on the same machine —
+compromising one plausibly compromises both, so it buys little. A GitHub Actions secret sits behind
+a different access boundary: reading or changing it needs GitHub account/API access, not possession
+of the SSH signing key. A stolen signing key alone can still forge a signed commit that rewrites
+`allowed_signers`, and can still get `critical-file-cooldown` to pass after 24h of nobody noticing —
+but it cannot make that forged file match the pinned hash, because the secret isn't derived from, or
+reachable by, that key.
+
+**What this does not cover, stated plainly:** if the GitHub account itself is compromised (not just
+the SSH key), the attacker can update `ALLOWED_SIGNERS_SHA256` to match their forged file and this
+check passes trivially — same single-point-of-trust limit as everywhere else in this document, just
+moved from "steal one SSH key" to "steal the GitHub account." It also means every legitimate key
+rotation now needs a manual, out-of-band secret update in addition to the signed-commit-plus-
+cooldown path above; skipping that step after a real rotation breaks releases until the secret is
+updated, it does not silently fall back to trusting the file unpinned.
